@@ -1,3 +1,4 @@
+#include "error_handler.hpp"
 #include "position.hpp"
 #include "encoder_calibration.hpp" // Use the new refactored calibration class
 #include "current_loop.hpp"        // For flux_control
@@ -53,6 +54,7 @@ void initializePosition(position_instance_f32_t *s, uint8_t polepairs,
         // A zero marker is written only by the explicit CAN calibration
         // command. Blank or legacy flash data must not start calibration.
         calibrator.run(polepairs, NUM_SAMPLES, WINDOW_SIZE);
+        if (Error_IsActive()) return;
         calibration_available = true;
         if (calibrator.save_to_flash())
             FLASH_UPDATE = ENCODER_CALIBRATION_MARKER;

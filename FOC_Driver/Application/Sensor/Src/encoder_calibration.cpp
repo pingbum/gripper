@@ -1,3 +1,4 @@
+#include "error_handler.hpp"
 #include "encoder_calibration.hpp"
 #include "math_tools.hpp"
 #include "constants.hpp"
@@ -71,12 +72,15 @@ void EncoderCalibrator_t::run(uint8_t pole_pairs, uint32_t num_samples,
 
     // Detect wiring direction before building the offset table.
     direction_ = detect_direction(pole_pairs, num_samples);
+    if (Error_IsActive()) return;
 
     // 1) Forward sweep: accumulate into the buffer.
     measure_and_merge(pole_pairs, num_samples, /*dir_sign=*/+1);
+    if (Error_IsActive()) return;
 
     // 2) Reverse sweep: merge using circular mean.
     measure_and_merge(pole_pairs, num_samples, /*dir_sign=*/-1);
+    if (Error_IsActive()) return;
 
     interpolate_data(num_samples);
     filter_data(num_samples, window_size); // Filter as configured.
@@ -84,7 +88,7 @@ void EncoderCalibrator_t::run(uint8_t pole_pairs, uint32_t num_samples,
 
 bool EncoderCalibrator_t::save_to_flash()
 {
-    if (!offset_data_)
+    if (!offset_data_ || Error_IsActive())
         return false;
 
     uint32_t flash_status = 0;
@@ -188,6 +192,7 @@ float32_t EncoderCalibrator_t::detect_direction(uint8_t pole_pairs,
 
     for (uint32_t i = 1; i <= steps; ++i)
     {
+        if (Error_IsActive()) return 1.0f;
         const float32_t target_elec = i * step;
         motor_control_func_(target_elec);
         HAL_Delay(5);
@@ -222,6 +227,7 @@ void EncoderCalibrator_t::measure_and_merge(uint8_t pole_pairs,
 
     for (uint32_t i = 0; i < num_samples; ++i)
     {
+        if (Error_IsActive()) return;
         // dir_sign = +1 forward, -1 reverse.
         const float32_t target_elec = dir_sign * (i * resolution);
         motor_control_func_(target_elec);

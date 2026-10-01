@@ -11,8 +11,13 @@
 
 extern State_t state;
 
+// Debugger counters. Queued TX means accepted by FDCAN, not bus ACK.
+volatile uint32_t can_status_tx_queued = 0;
+volatile uint32_t can_status_tx_errors = 0;
+volatile uint32_t can_rx_frames = 0;
+
 namespace {
-constexpr uint8_t DEFAULT_DRIVER_ID = 0x00; // Default motor/driver ID.
+constexpr uint8_t DEFAULT_DRIVER_ID = 0x01; // Default motor/driver ID.
 constexpr uint32_t CAN_ID_CONFIG_MAGIC =
     0xA5A5A5A5u;                          // Magic for CAN ID config.
 constexpr uint8_t MODE_READ_FLAG = 0x80u; // Read-back request bit.
@@ -404,6 +409,7 @@ extern "C" void HAL_FDCAN_RxFifo1Callback(FDCAN_HandleTypeDef *hfdcan,
     if (HAL_FDCAN_GetRxMessage(hfdcan, FDCAN_RX_FIFO1, &rxh, data) != HAL_OK)
       break;
 
+    can_rx_frames = can_rx_frames + 1U;
     handle_rx_message(rxh, data);
   }
 
@@ -471,6 +477,9 @@ void CAN_Handler::broadcast_motor_status(float position_deg, float speed_erpm,
   tx_data[7] = error_code; // Error code
 
   if (HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &txHeader, tx_data) != HAL_OK) {
+    can_status_tx_errors = can_status_tx_errors + 1U;
     Error_Raise(ERROR_CAN);
+  } else {
+    can_status_tx_queued = can_status_tx_queued + 1U;
   }
 }

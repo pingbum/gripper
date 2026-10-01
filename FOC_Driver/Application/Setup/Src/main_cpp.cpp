@@ -29,10 +29,11 @@
 
 // ---- SPI and peripheral driver instances ----
 static SPIHandler_t spiDrv(&hspi1, DRV8316_NSS_GPIO_Port, DRV8316_NSS_Pin);
-static SPIHandler_t spiEnc(&hspi3, MA732_CS_GPIO_Port, MA732_CS_Pin);
+
 
 static DRV8316C_t drv8316(spiDrv);
-static MA732_t encoder(spiEnc);
+static MA732_t encoder;
+static volatile bool position_ready = false;
 
 // ---- Application state ----
 uint32_t FLASH_UPDATE = 0;
@@ -44,7 +45,20 @@ static volatile uint16_t s_adc5_buf[2]; // [0] VREFINT, [1] TEMP
 uint32_t process_time_pos = 0;
 volatile float32_t cogging_lut_debug[CoggingCompensation::BIN_COUNT] = {};
 
+// Debugger: 0=entry, 1=CAN online, 2=DRV setup, 3=encoder wait,
+// 4=position/calibration, 5=running, 255=startup fault.
+volatile uint32_t slave_boot_stage = 0;
+
 namespace {
+[[noreturn]] void startup_fault(uint8_t flags) {
+  slave_boot_stage = 255;
+  DRVOFF_GPIO_Port->BSRR = DRVOFF_Pin;
+  Error_Raise(flags);
+  // Leave CAN RX and TIM17 running if their initialization succeeded.
+  // Encoder/DRV failures must not hide error reports or reset/ID commands.
+  while (1) HAL_Delay(100);
+}
+
 CoggingCompensation cogging;
 bool cogging_compensation_is_enabled = true;
 
@@ -240,7 +254,33 @@ float32_t cogging_table_value(uint16_t bin) { return cogging.table_value(bin); }
  */
 extern "C" void main_cpp(void) {
 
+  DRVOFF_GPIO_Port->BSRR = DRVOFF_Pin;
+  HAL_TIM_Base_Start(&htim2);
+
+  // Initialize values exposed to CAN before enabling its RX/TX interrupts.
+  state.position.p = MOTOR_POLE_PAIRS;
+  state.position.direction = 1.0f;
+  FLASH_UPDATE = *(uint32_t *)ENCODER_FLASH_UPDATE;
+  load_control_params_from_flash();
+  current_loop_init();
+  velocity_loop_init();
+  position_loop_init();
+
+  // Status reporting must not depend on encoder/DRV initialization success.
+  CAN_Handler::FDCAN1_SetupFiltersAndStart();
+  if (state.error_flags.can_error) startup_fault(ERROR_CAN);
+  if (HAL_TIM_RegisterCallback(&htim17, HAL_TIM_PERIOD_ELAPSED_CB_ID,
+                              TIM17_PeriodElapsedCB) != HAL_OK ||
+      HAL_TIM_Base_Start_IT(&htim17) != HAL_OK)
+    startup_fault(ERROR_HAL_TIM);
+  slave_boot_stage = 1;
+
+  if (encoder.start() != HAL_OK) {
+    startup_fault(ERROR_SPI);
+  }
+
   // Set Drv8316
+  slave_boot_stage = 2;
   drv8316.clearFAULT();
   HAL_Delay(100);
   drv8316.setBuckVoltage(4.0f);
@@ -265,6 +305,19 @@ extern "C" void main_cpp(void) {
   HAL_ADCEx_Calibration_Start(&hadc3, ADC_SINGLE_ENDED);
   HAL_ADCEx_Calibration_Start(&hadc5, ADC_SINGLE_ENDED);
 
+  // Do not enable PWM until a fresh complete shared-encoder frame arrives.
+  slave_boot_stage = 3;
+  const uint32_t wait_start = HAL_GetTick();
+  uint16_t first_word = 0;
+  while (encoder.readAngle(first_word) != HAL_OK &&
+         HAL_GetTick() - wait_start < 1000U) HAL_Delay(1);
+  if (encoder.readAngle(first_word) != HAL_OK) {
+    startup_fault(ERROR_SPI);
+  }
+  if (Error_IsActive()) startup_fault(GET_ERROR_FLAGS(&state));
+
+  HAL_GPIO_WritePin(DRVOFF_GPIO_Port, DRVOFF_Pin, GPIO_PIN_RESET);
+
   // HRTIM
   HAL_HRTIM_WaveformOutputStart(&hhrtim1, HRTIM_OUTPUT_TA1);
   HAL_HRTIM_WaveformOutputStart(&hhrtim1, HRTIM_OUTPUT_TA2);
@@ -275,12 +328,6 @@ extern "C" void main_cpp(void) {
   HAL_HRTIM_WaveformOutputStart(&hhrtim1, HRTIM_OUTPUT_TD1);
   HAL_HRTIM_WaveformOutputStart(&hhrtim1, HRTIM_OUTPUT_TD2);
 
-  // Controller Initialization
-  FLASH_UPDATE = *(uint32_t *)ENCODER_FLASH_UPDATE; // Encoder calibration.
-  load_control_params_from_flash();
-  current_loop_init();
-  velocity_loop_init();
-  position_loop_init();
   load_cogging_lut_from_flash();
 
   // HRTIM Start
@@ -289,11 +336,19 @@ extern "C" void main_cpp(void) {
   if (HAL_HRTIM_WaveformCounterStart(
           &hhrtim1, HRTIM_TIMERID_TIMER_A | HRTIM_TIMERID_TIMER_C |
                         HRTIM_TIMERID_TIMER_D) != HAL_OK) {
-    Error_Raise(ERROR_HAL_HRTIM);
+    startup_fault(ERROR_HAL_HRTIM);
   }
 
   // Position
+  slave_boot_stage = 4;
   initializePosition(&state.position, MOTOR_POLE_PAIRS, encoder);
+  if (Error_IsActive()) {
+    startup_fault(GET_ERROR_FLAGS(&state));
+  }
+  TIM6_PeriodElapsedCB(&htim6); // Seed angle before enabling current control.
+  if (Error_IsActive()) {
+    startup_fault(GET_ERROR_FLAGS(&state));
+  }
 
   // ADC Initialization
   HAL_ADC_RegisterCallback(&hadc2, HAL_ADC_INJ_CONVERSION_COMPLETE_CB_ID,
@@ -306,35 +361,29 @@ extern "C" void main_cpp(void) {
 
   HAL_ADC_Start_DMA(&hadc5, (uint32_t *)s_adc5_buf, 2);
 
-  // CAN
-  CAN_Handler::FDCAN1_SetupFiltersAndStart();
-
   // Timer Init
   HAL_TIM_RegisterCallback(&htim6, HAL_TIM_PERIOD_ELAPSED_CB_ID,
                            TIM6_PeriodElapsedCB);
   HAL_TIM_RegisterCallback(&htim7, HAL_TIM_PERIOD_ELAPSED_CB_ID,
                            TIM7_PeriodElapsedCB);
-  HAL_TIM_RegisterCallback(&htim17, HAL_TIM_PERIOD_ELAPSED_CB_ID,
-                           TIM17_PeriodElapsedCB);
   HAL_TIM_RegisterCallback(&htim16, HAL_TIM_PERIOD_ELAPSED_CB_ID,
                            TIM16_PeriodElapsedCB);
 
-  HAL_TIM_Base_Start(&htim2);
   HAL_TIM_Base_Start_IT(&htim6);
   HAL_TIM_Base_Start_IT(&htim7);
   HAL_TIM_Base_Start_IT(&htim16);
-  HAL_TIM_Base_Start_IT(&htim17);
 
   state.position.rev = 0;
   state.CONTROL_MODE = 0x01;
+  slave_boot_stage = 5;
   //state.theta_ref = 30;
 
-  // CAN_Handler::FDCAN1_SetupFiltersAndStart();
   while (1) {
     // drv8316.Read(0x00, result);
     // angle = encoder.readAngleRaw();
 
-    HAL_Delay(100);
+    if (Error_IsActive()) _Error_Handler();
+    HAL_Delay(1);
   }
 }
 
@@ -342,7 +391,7 @@ extern "C" void main_cpp(void) {
 void HAL_ADC_ConversionENDCallback(ADC_HandleTypeDef *hadc) {
   /* Triggered after ADC2 injected conversion complete (JEOS). */
   UNUSED(hadc);
-  if (Error_IsActive()) {
+  if (Error_IsActive() || !position_ready) {
     return;
   }
   float32_t iq_command = state.iq_ref;
@@ -362,26 +411,29 @@ void HAL_ADC_ConversionENDCallback(ADC_HandleTypeDef *hadc) {
 // 10 kHz encoder update loop (same update rate used by the previous encoder).
 void TIM6_PeriodElapsedCB(TIM_HandleTypeDef *htim) {
   UNUSED(htim);
-  static uint32_t time_prev = 0; // TIM2 counter reference.
-  uint32_t time_current = htim2.Instance->CNT;
-  uint32_t time_delta = time_current - time_prev;
-
-  uint16_t angle_word = 0U;
-  const HAL_StatusTypeDef encoder_status = encoder.readAngle(angle_word);
-
-  if (encoder_status != HAL_OK) {
+  static uint32_t previous_cycles = 0;
+  static uint32_t previous_sequence = 0;
+  const uint32_t begin = TIM2->CNT;
+  MA732_t::Sample sample{};
+  const auto status = encoder.readSample(sample);
+  if (status != HAL_OK) {
+    position_ready = false;
     Error_Raise(ERROR_SPI);
     return;
   }
-
-  const uint16_t angle_raw = angle_word >> 2U;
-  const float32_t angle_deg =
-      static_cast<float32_t>(angle_raw) * (360.0f / 16384.0f);
-
-  updatePositionMech(&state.position, angle_deg, (float32_t)time_delta * DT,
-                     NUM_SAMPLES);
-  process_time_pos = htim2.Instance->CNT - time_current; // Debug timing.
-  time_prev = time_current;
+  if (sample.sequence == previous_sequence) return;
+  const float32_t angle = (sample.word >> 2U) * (360.0f / 16384.0f);
+  if (!position_ready) {
+    state.position.theta_m_prev = angle;
+    state.position.omega_m = 0.0f;
+  }
+  const uint32_t elapsed = sample.cycles - previous_cycles;
+  const float32_t dt = position_ready && elapsed != 0U ? elapsed * DT : 0.0001f;
+  updatePositionMech(&state.position, angle, dt, NUM_SAMPLES);
+  previous_cycles = sample.cycles;
+  previous_sequence = sample.sequence;
+  position_ready = true;
+  process_time_pos = TIM2->CNT - begin;
 }
 
 // 5 kHz loop.

@@ -73,8 +73,6 @@ void Error_Handler(void);
 #define USER_LED_GPIO_Port GPIOA
 #define DRV8316_NSS_Pin GPIO_PIN_4
 #define DRV8316_NSS_GPIO_Port GPIOC
-#define MA732_CS_Pin GPIO_PIN_6
-#define MA732_CS_GPIO_Port GPIOB
 #define DRVOFF_Pin GPIO_PIN_7
 #define DRVOFF_GPIO_Port GPIOB
 #define nFault_Pin GPIO_PIN_9

@@ -1,3 +1,5 @@
+> 현재 이 폴더는 **MA732 공유 엔코더 Slave** 버전입니다. 핀 연결, Master 타이밍 조건과 수신 방식은 [Slave 구성 문서](docs/ma732_shared_slave.md)를 참고하세요.
+
 LED : 붉은 색->DRV 오류
 LED : 푸른 색 1초 주기 -> 정상 동작
 LED : 푸른 색 항상 동작 -> CAN 오류
@@ -12,7 +14,7 @@ LED : 푸른 색 항상 동작 -> CAN 오류
 
 * **MCU**: STM32G4 시리즈 (고성능 FPU 및 HRTIM 활용).
 * **Driver IC**: TI DRV8316C (SPI 제어 방식).
-* **Encoder**: MA732 (14-bit 자기식 엔코더, 16-bit SPI 프레임).
+* **Encoder**: MA732 (Master가 읽는 16-bit SPI 프레임을 공유 수신).
 * **Communication**: FDCAN1 (실시간 제어 및 데이터 브로드캐스트).
 
 ## 2. 소프트웨어 아키텍처 (Software Features)

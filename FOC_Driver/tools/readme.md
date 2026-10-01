@@ -134,18 +134,19 @@ tools/
 `config.py`에서 기본값을 바꿀 수 있습니다.
 
 ```python
-DEFAULT_INTERFACE = "slcan"   # "slcan" or "gs_usb"
-DEFAULT_CHANNEL   = "COM11"   # 예: "COM11" / "0"
+DEFAULT_INTERFACE = "socketcan"   # "socketcan", "slcan", "gs_usb"
+DEFAULT_CHANNEL   = "can0"        # 인터페이스에 맞는 채널
 DEFAULT_BITRATE   = 1000000
-    MAX_POINTS         = 5000
-    RX_QUEUE_SIZE      = 1
-    MAX_QUEUE_BACKLOG  = RX_QUEUE_SIZE
-    MAX_DRAIN_PER_TICK = 200
-    UPDATE_INTERVAL_MS = 10
-    PLOT_MAX_HZ        = 100
-    REF_SEND_HZ        = 1000
+MAX_POINTS         = 5000
+UPDATE_INTERVAL_MS = 10
+PLOT_MAX_HZ        = 100
+REF_SEND_HZ        = 1000
 ```
 
+* 수신 상태는 드라이버 ID별로 최신 1개씩 보관합니다. 여러 보드를 연결해도
+  다른 ID의 프레임이 선택한 보드의 최신 상태를 덮어쓰지 않습니다.
+* **Listen Driver ID**로 표시할 보드를 선택합니다. 새 상태가 도착했을 때만
+  그래프에 추가하며, 스캔·파라미터 응답은 상태 그래프에 섞지 않습니다.
 * `REF_SEND_HZ`는 참조파 전송 주기이며, CAN 부하에 따라 50~200Hz 권장입니다.
 
 ---

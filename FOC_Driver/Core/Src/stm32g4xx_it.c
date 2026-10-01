@@ -46,6 +46,7 @@
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN PFP */
+extern void MA732_SlaveWatchdog(void);
 
 /* USER CODE END PFP */
 
@@ -63,7 +64,6 @@ extern HRTIM_HandleTypeDef hhrtim1;
 extern DMA_HandleTypeDef hdma_spi1_rx;
 extern DMA_HandleTypeDef hdma_spi1_tx;
 extern DMA_HandleTypeDef hdma_spi3_rx;
-extern DMA_HandleTypeDef hdma_spi3_tx;
 extern TIM_HandleTypeDef htim6;
 extern TIM_HandleTypeDef htim7;
 extern TIM_HandleTypeDef htim16;
@@ -205,6 +205,7 @@ void SysTick_Handler(void)
   /* USER CODE END SysTick_IRQn 0 */
   HAL_IncTick();
   /* USER CODE BEGIN SysTick_IRQn 1 */
+  MA732_SlaveWatchdog();
 
   /* USER CODE END SysTick_IRQn 1 */
 }
@@ -341,20 +342,6 @@ void DMA2_Channel2_IRQHandler(void)
   /* USER CODE BEGIN DMA2_Channel2_IRQn 1 */
 
   /* USER CODE END DMA2_Channel2_IRQn 1 */
-}
-
-/**
-  * @brief This function handles DMA2 channel3 global interrupt.
-  */
-void DMA2_Channel3_IRQHandler(void)
-{
-  /* USER CODE BEGIN DMA2_Channel3_IRQn 0 */
-
-  /* USER CODE END DMA2_Channel3_IRQn 0 */
-  HAL_DMA_IRQHandler(&hdma_spi3_tx);
-  /* USER CODE BEGIN DMA2_Channel3_IRQn 1 */
-
-  /* USER CODE END DMA2_Channel3_IRQn 1 */
 }
 
 /**

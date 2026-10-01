@@ -62,7 +62,7 @@ void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOA, PULSE_Pin|COMM_ERROR_Pin|DRV_ERROR_Pin|USER_LED_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, MA732_CS_Pin|DRVOFF_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(DRVOFF_GPIO_Port, DRVOFF_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pins : Button_Pin DRV8316_NSS_Pin */
   GPIO_InitStruct.Pin = Button_Pin|DRV8316_NSS_Pin;
@@ -98,24 +98,24 @@ void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PB10 PB11 PB8 */
-  GPIO_InitStruct.Pin = GPIO_PIN_10|GPIO_PIN_11|GPIO_PIN_8;
+  /*Configure GPIO pins : PB10 PB11 PB4 PB8 */
+  GPIO_InitStruct.Pin = GPIO_PIN_10|GPIO_PIN_11|GPIO_PIN_4|GPIO_PIN_8;
   GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : MA732_CS_Pin DRVOFF_Pin */
-  GPIO_InitStruct.Pin = MA732_CS_Pin|DRVOFF_Pin;
+  /*Configure GPIO pins : PB6 nFault_Pin */
+  GPIO_InitStruct.Pin = GPIO_PIN_6|nFault_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : DRVOFF_Pin */
+  GPIO_InitStruct.Pin = DRVOFF_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : nFault_Pin */
-  GPIO_InitStruct.Pin = nFault_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(nFault_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(DRVOFF_GPIO_Port, &GPIO_InitStruct);
 
 }
 

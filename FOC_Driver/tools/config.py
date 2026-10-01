@@ -16,13 +16,6 @@ DEFAULT_BITRATE = 1000000
 # 수신 버퍼 최대 길이(점 개수)
 MAX_POINTS = 5000
 
-# 수신 큐 크기 (작게 유지해 레이턴시 최소화)
-RX_QUEUE_SIZE = 1
-# 큐 백로그 최대 허용 (이상은 오래된 프레임 드롭)
-MAX_QUEUE_BACKLOG = RX_QUEUE_SIZE
-# 한 틱에서 처리할 최대 프레임 수 (UI 멈춤 방지)
-MAX_DRAIN_PER_TICK = 200
-
 # 그래프 업데이트 주기(ms)
 UPDATE_INTERVAL_MS = 10
 

@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 from PyQt5 import QtWidgets, QtCore
 import time
-import queue
 import threading
 from collections import deque
 import os
@@ -11,7 +10,7 @@ if __package__ in (None, ""):
     sys.path.append(os.path.dirname(os.path.dirname(__file__)))
     from gui.deps import (
         REF_SEND_HZ,
-        MAX_POINTS, UPDATE_INTERVAL_MS, PLOT_MAX_HZ, RX_QUEUE_SIZE,
+        MAX_POINTS, UPDATE_INTERVAL_MS, PLOT_MAX_HZ,
         CANBusManager
     )
     from gui.ui_builder import UIBuilderMixin
@@ -21,7 +20,7 @@ if __package__ in (None, ""):
 else:
     from .deps import (
         REF_SEND_HZ,
-        MAX_POINTS, UPDATE_INTERVAL_MS, PLOT_MAX_HZ, RX_QUEUE_SIZE,
+        MAX_POINTS, UPDATE_INTERVAL_MS, PLOT_MAX_HZ,
         CANBusManager
     )
     from .ui_builder import UIBuilderMixin
@@ -60,7 +59,6 @@ class MainWindow(
 
         # CAN
         self.manager = CANBusManager()
-        self.msg_queue: "queue.Queue" = queue.Queue(maxsize=RX_QUEUE_SIZE)
         self.reader_stop = threading.Event()
         self.reader_thread = None
         self.scan_hits = set()

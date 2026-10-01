@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 import time
-import queue
 import threading
 from PyQt5 import QtCore
 
@@ -8,7 +7,7 @@ from .deps import (
     REF_SEND_HZ,
     MODE_CURRENT, MODE_VELOCITY, MODE_CALIBRATION, MODE_COGGING_COMPENSATION,
     MODE_COGGING_TOGGLE,
-    MAX_QUEUE_BACKLOG, MAX_DRAIN_PER_TICK, PLOT_MAX_HZ
+    PLOT_MAX_HZ
 )
 from .deps import (
     build_ext_id, pack_command_payload, parse_broadcast_frame, pack_calibration_payload
@@ -57,7 +56,6 @@ class CANHandlersMixin:
             self.reader_stop.clear()
             self.reader_thread = CANReaderThread(
                 self.manager.bus,
-                self.msg_queue,
                 self.reader_stop,
                 self.scan_hits,
                 self.scan_lock,
@@ -133,48 +131,19 @@ class CANHandlersMixin:
         listen_id = self.spin_listen.value()
         any_parsed = False
         did_plot_update = False
-        dropped = 0
-
-        try:
-            qsize = self.msg_queue.qsize()
-        except Exception:
-            qsize = 0
-        if qsize > MAX_QUEUE_BACKLOG:
-            drop_target = max(0, qsize - (MAX_QUEUE_BACKLOG // 2))
-            for _ in range(drop_target):
-                try:
-                    self.msg_queue.get_nowait()
-                    dropped += 1
-                except queue.Empty:
-                    break
-
         last_parsed = None
         last_ts = None
         last_error = None
-        drained = 0
-        while drained < MAX_DRAIN_PER_TICK:
+        sample = self.reader_thread.take_latest_status(listen_id) if self.reader_thread else None
+        if sample is not None:
+            ts, data = sample
             try:
-                ts, eid, data = self.msg_queue.get_nowait()
-            except queue.Empty:
-                break
-
-            if (eid & 0xFF) != (listen_id & 0xFF):
-                continue
-            if len(data) != 8:
-                continue
-
-            try:
-                parsed = parse_broadcast_frame(data)
+                last_parsed = parse_broadcast_frame(data)
             except Exception:
-                continue
-
-            last_parsed = parsed
-            last_ts = ts
-            last_error = parsed["error"]
-            drained += 1
-
-        if dropped:
-            self._log(f"Queue backlog drop: {dropped} frame(s)")
+                pass
+            else:
+                last_ts = ts
+                last_error = last_parsed["error"]
 
         self._update_rate_label()
         self._poll_read_response()

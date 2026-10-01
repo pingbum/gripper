@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 import time
 import threading
-import queue
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 import can
 
 class CANBusManager:
@@ -45,13 +44,12 @@ class CANBusManager:
 
 class CANReaderThread(threading.Thread):
     """
-    수신 스레드: 확장 프레임만 큐에 넣는다.
-    큐 항목: (timestamp, arbitration_id, data_bytes)
+    수신 스레드: 각 드라이버의 최신 상태를 독립적으로 보관한다.
+    스캔/파라미터 응답은 기존 대기 경로로 전달한다.
     """
     def __init__(
         self,
         bus: can.Bus,
-        out_queue: "queue.Queue[Tuple[float,int,bytes]]",
         stop_event: threading.Event,
         scan_hits: Optional[set] = None,
         scan_lock: Optional[threading.Lock] = None,
@@ -61,7 +59,6 @@ class CANReaderThread(threading.Thread):
     ):
         super().__init__(daemon=True)
         self.bus = bus
-        self.q = out_queue
         self.stop_event = stop_event
         self.scan_hits = scan_hits
         self.scan_lock = scan_lock
@@ -70,6 +67,13 @@ class CANReaderThread(threading.Thread):
         self.read_lock = read_lock
         self._rx_count = 0
         self._count_lock = threading.Lock()
+        self._status_lock = threading.Lock()
+        self._latest_status: Dict[int, Tuple[float, bytes]] = {}
+
+    def take_latest_status(self, driver_id: int) -> Optional[Tuple[float, bytes]]:
+        """Consume this driver's newest sample once; retain other drivers' samples."""
+        with self._status_lock:
+            return self._latest_status.pop(driver_id, None)
 
     def get_and_reset_rx_count(self) -> int:
         with self._count_lock:
@@ -87,6 +91,8 @@ class CANReaderThread(threading.Thread):
             if msg is None:
                 continue
             if not getattr(msg, "is_extended_id", False):
+                continue
+            if getattr(msg, "is_error_frame", False) or getattr(msg, "is_remote_frame", False):
                 continue
             data = bytes(getattr(msg, "data", b""))
             if len(data) not in (1, 4, 8):
@@ -108,16 +114,8 @@ class CANReaderThread(threading.Thread):
                     driver_id = eid & 0xFF
                     with self.scan_lock:
                         self.scan_hits.add(int(driver_id))
-            ts = time.time()
-            try:
-                self.q.put_nowait((ts, msg.arbitration_id, data))
-            except queue.Full:
-                # 최신 것 위주로 보기 위해 오래된 것 버림
-                try:
-                    self.q.get_nowait()
-                except Exception:
-                    pass
-                try:
-                    self.q.put_nowait((ts, msg.arbitration_id, data))
-                except Exception:
-                    pass
+            # Status uses mode 0 (EID equals the 8-bit driver ID), with 8 bytes.
+            # Commands/responses sharing the low ID byte must not replace it.
+            if 0 <= msg.arbitration_id <= 0xFF and len(data) == 8:
+                with self._status_lock:
+                    self._latest_status[msg.arbitration_id] = (time.time(), data)
