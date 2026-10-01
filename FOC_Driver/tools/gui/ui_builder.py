@@ -148,15 +148,24 @@ class UIBuilderMixin:
         self.iface_combo = QtWidgets.QComboBox()
         self.iface_combo.addItems(["gs_usb", "slcan", "socketcan"])
         self.iface_combo.setCurrentText(DEFAULT_INTERFACE)
-        self.channel_edit = QtWidgets.QLineEdit(DEFAULT_CHANNEL)
+        self.channel_combo = QtWidgets.QComboBox()
+        self.channel_combo.setEditable(True)
+        self.channel_edit = self.channel_combo.lineEdit()
+        self.channel_edit.setText(DEFAULT_CHANNEL)
+        self.btn_refresh_channels = QtWidgets.QPushButton("Refresh ports")
+        self.connection_hint = QtWidgets.QLabel()
+        self.connection_hint.setWordWrap(True)
+        self.connection_hint.setMaximumWidth(260)
         self.bitrate_edit = QtWidgets.QLineEdit(str(DEFAULT_BITRATE))
         self.btn_connect = QtWidgets.QPushButton("Connect")
         self.btn_disconnect = QtWidgets.QPushButton("Disconnect")
         self.btn_disconnect.setEnabled(False)
         gl.addWidget(QtWidgets.QLabel("Interface"), 0, 0); gl.addWidget(self.iface_combo, 0, 1)
-        gl.addWidget(QtWidgets.QLabel("Channel"), 1, 0);   gl.addWidget(self.channel_edit, 1, 1)
+        gl.addWidget(QtWidgets.QLabel("Channel"), 1, 0);   gl.addWidget(self.channel_combo, 1, 1)
         gl.addWidget(QtWidgets.QLabel("Bitrate"), 2, 0);   gl.addWidget(self.bitrate_edit, 2, 1)
         gl.addWidget(self.btn_connect, 3, 0);              gl.addWidget(self.btn_disconnect, 3, 1)
+        gl.addWidget(self.btn_refresh_channels, 4, 0, 1, 2)
+        gl.addWidget(self.connection_hint, 5, 0, 1, 2)
         left_vbox.addWidget(conn)
 
         # Write Command Group
@@ -230,6 +239,7 @@ class UIBuilderMixin:
 
         self.log = QtWidgets.QPlainTextEdit()
         self.log.setReadOnly(True)
+        self.log.setMaximumBlockCount(500)
         self.log.setMaximumHeight(200)
         center_vbox.addWidget(self.log, 1)
 
@@ -247,14 +257,21 @@ class UIBuilderMixin:
         self.cb_spd = QtWidgets.QCheckBox("Speed (eRPM)");  self.cb_spd.setChecked(True)
         self.cb_cur = QtWidgets.QCheckBox("Current (A)");   self.cb_cur.setChecked(True)
         self.cb_tmp = QtWidgets.QCheckBox("Temp (°C)");     self.cb_tmp.setChecked(True)
-        self.lbl_error = QtWidgets.QLabel("Error: 0x00 (OK)")
+        self.lbl_error = QtWidgets.QLabel("Error: waiting for selected ID")
         self.lbl_rate = QtWidgets.QLabel("Rate: RX 0.0 Hz / TX 0.0 Hz")
+        self.lbl_rate.setToolTip("RX: all valid received IDs. TX: successful backend sends (not motor acknowledgements).")
+        self.lbl_tx_health = QtWidgets.QLabel("TX skipped: 0")
+        self.btn_record = QtWidgets.QPushButton("Record RX CSV")
+        self.btn_record.setEnabled(False)
+        self.lbl_record = QtWidgets.QLabel("CSV: off")
         self.btn_scan = QtWidgets.QPushButton("Scan Motors")
         gl3.addWidget(QtWidgets.QLabel("Motor")); gl3.addWidget(self.combo_motor)
         gl3.addWidget(QtWidgets.QLabel("Listen Driver ID")); gl3.addWidget(self.spin_listen)
         gl3.addWidget(self.cb_pos); gl3.addWidget(self.cb_spd)
         gl3.addWidget(self.cb_cur); gl3.addWidget(self.cb_tmp)
         gl3.addWidget(self.lbl_error); gl3.addWidget(self.lbl_rate)
+        gl3.addWidget(self.lbl_tx_health)
+        gl3.addWidget(self.btn_record); gl3.addWidget(self.lbl_record)
         gl3.addWidget(self.btn_scan)
         right_vbox.addWidget(flt)
 
@@ -266,11 +283,16 @@ class UIBuilderMixin:
         self.spin_amp = QtWidgets.QDoubleSpinBox(); self.spin_amp.setRange(0.0, 1e9); self.spin_amp.setDecimals(2); self.spin_amp.setSingleStep(0.1); self.spin_amp.setValue(1.0)
         self.spin_freq = QtWidgets.QDoubleSpinBox(); self.spin_freq.setRange(0.01, 200.0); self.spin_freq.setValue(1.0)
         self.btn_ref_toggle = QtWidgets.QPushButton("Start Ref")
+        from config import REF_SEND_HZ, MAX_REF_SEND_HZ
+        self.spin_tx_hz = QtWidgets.QSpinBox()
+        self.spin_tx_hz.setRange(1, MAX_REF_SEND_HZ)
+        self.spin_tx_hz.setValue(REF_SEND_HZ)
 
         gr.addWidget(QtWidgets.QLabel("Shape"), 0, 0); gr.addWidget(self.combo_shape, 0, 1)
         gr.addWidget(QtWidgets.QLabel("Amp"), 1, 0);   gr.addWidget(self.spin_amp, 1, 1)
         gr.addWidget(QtWidgets.QLabel("Freq"), 2, 0);  gr.addWidget(self.spin_freq, 2, 1)
-        gr.addWidget(self.cb_ref_show, 3, 0);          gr.addWidget(self.btn_ref_toggle, 3, 1)
+        gr.addWidget(QtWidgets.QLabel("TX Hz (target)"), 3, 0); gr.addWidget(self.spin_tx_hz, 3, 1)
+        gr.addWidget(self.cb_ref_show, 4, 0);          gr.addWidget(self.btn_ref_toggle, 4, 1)
         right_vbox.addWidget(ref)
 
         # 3. Axis Controls
@@ -336,6 +358,9 @@ class UIBuilderMixin:
 
         # ================== [그래프 초기화 및 시그널 연결] ==================
         self.btn_connect.clicked.connect(self._on_connect)
+        self.iface_combo.currentTextChanged.connect(self._on_interface_changed)
+        self.btn_refresh_channels.clicked.connect(self._refresh_channels)
+        self.btn_record.clicked.connect(self._on_record_toggle)
         self.btn_disconnect.clicked.connect(self._on_disconnect)
         self.btn_write.clicked.connect(self._on_write)
         self.btn_calib.clicked.connect(self._on_calib)
@@ -395,6 +420,11 @@ class UIBuilderMixin:
 
         self._sync_views()
         self._set_ref_axis_target(self.combo_mode.currentData())
+        self.spin_amp.valueChanged.connect(self._on_ref_parameters_changed)
+        self.spin_freq.valueChanged.connect(self._on_ref_parameters_changed)
+        self.combo_shape.currentTextChanged.connect(self._on_ref_parameters_changed)
+        self.combo_mode.currentIndexChanged.connect(self._on_ref_parameters_changed)
+        self.spin_driver.valueChanged.connect(self._on_ref_parameters_changed)
 
     def _update_timewin_label(self, value: float):
         self.lbl_timewin.setText(f"{value:.1f} s")

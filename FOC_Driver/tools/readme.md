@@ -1,5 +1,8 @@
 # FD CAN Slave Monitor/Control (Python + CANable) README
 
+현재 Windows/Linux 설치, 연결 설정, 1000Hz TX worker, 40Hz 그래프 및
+CSV 기록 사용법은 [monitor_setup.md](monitor_setup.md)를 참고하세요.
+
 ---
 
 ## 1) 프로젝트 개요
@@ -58,8 +61,8 @@ tools/
 
 ## 3) 요구 사항
 
-* **Windows 10/11 (64-bit)**
-* **Python 3.9+** (공식 설치 권장)
+* **Windows 10/11 또는 Linux 데스크톱**
+* **Python 3.11+** (OS별 가상환경 권장)
 
   ```powershell
   python --version
@@ -67,10 +70,10 @@ tools/
 * 패키지:
 
   ```powershell
-  pip install python-can PyQt5 pyqtgraph
+  python -m pip install -r tools/requirements.txt
   ```
 
-  * slcan(직렬) 사용 시 `pyserial`은 python-can이 의존성으로 설치합니다(필요 시 수동 설치 가능).
+  * slcan용 `pyserial`은 requirements에 명시되어 있습니다.
 
 ### 3.1 장치 드라이버/펌웨어
 
@@ -92,8 +95,7 @@ tools/
 1. 저장소를 준비하고 패키지 설치:
 
    ```powershell
-   cd tools
-   pip install python-can PyQt5 pyqtgraph
+   python -m pip install -r tools/requirements.txt
    ```
 2. 실행(둘 중 하나):
 
@@ -134,12 +136,12 @@ tools/
 `config.py`에서 기본값을 바꿀 수 있습니다.
 
 ```python
-DEFAULT_INTERFACE = "socketcan"   # "socketcan", "slcan", "gs_usb"
-DEFAULT_CHANNEL   = "can0"        # 인터페이스에 맞는 채널
+DEFAULT_INTERFACE = "socketcan"   # Linux. Windows 기본값은 "slcan"
+DEFAULT_CHANNEL   = "can0"        # Windows에서는 실제 COM 포트 선택
 DEFAULT_BITRATE   = 1000000
 MAX_POINTS         = 5000
-UPDATE_INTERVAL_MS = 10
-PLOT_MAX_HZ        = 100
+UPDATE_INTERVAL_MS = 25
+PLOT_MAX_HZ        = 40
 REF_SEND_HZ        = 1000
 ```
 
@@ -147,7 +149,8 @@ REF_SEND_HZ        = 1000
   다른 ID의 프레임이 선택한 보드의 최신 상태를 덮어쓰지 않습니다.
 * **Listen Driver ID**로 표시할 보드를 선택합니다. 새 상태가 도착했을 때만
   그래프에 추가하며, 스캔·파라미터 응답은 상태 그래프에 섞지 않습니다.
-* `REF_SEND_HZ`는 참조파 전송 주기이며, CAN 부하에 따라 50~200Hz 권장입니다.
+* `REF_SEND_HZ`는 참조파 기본 목표 주기입니다. GUI에서 1~1000Hz를 선택하며,
+  전용 스레드가 송신합니다. 실제 처리율은 RX/TX 표시와 TX skipped로 확인합니다.
 
 ---
 

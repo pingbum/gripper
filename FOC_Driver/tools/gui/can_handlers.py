@@ -4,7 +4,6 @@ import threading
 from PyQt5 import QtCore
 
 from .deps import (
-    REF_SEND_HZ,
     MODE_CURRENT, MODE_VELOCITY, MODE_CALIBRATION, MODE_COGGING_COMPENSATION,
     MODE_COGGING_TOGGLE,
     PLOT_MAX_HZ
@@ -12,8 +11,8 @@ from .deps import (
 from .deps import (
     build_ext_id, pack_command_payload, parse_broadcast_frame, pack_calibration_payload
 )
-from .deps import sine, square, triangle
 from .deps import CANReaderThread
+from can_workers import ReferenceCommand
 
 
 class CANHandlersMixin:
@@ -33,25 +32,34 @@ class CANHandlersMixin:
                     self.manager.send_ext(eid, b"\x00" * 8)
                 except Exception:
                     break
-                time.sleep(0.003)
+                self.scan_stop.wait(0.003)
             self._scan_in_progress = False
 
         self.scan_thread = threading.Thread(target=worker, daemon=True)
         self.scan_thread.start()
     # ------------- 연결/해제 -------------
     def _on_connect(self):
-        if self.manager.bus is not None:
+        if self.manager.bus is not None or self._disconnect_thread is not None:
             return
         iface = self.iface_combo.currentText().strip()
         channel = self.channel_edit.text().strip()
         try:
             bitrate = int(self.bitrate_edit.text().strip())
+            if bitrate <= 0:
+                raise ValueError()
         except ValueError:
-            self._log("Bitrate 숫자 아님")
+            self._log("CAN bitrate는 양의 정수여야 합니다.")
             return
 
         try:
             self.manager.connect(iface, channel, bitrate)
+            self._save_connection_settings()
+            self._reset_monitor()
+            self._last_rate_ts = time.monotonic()
+            with self.scan_lock:
+                self.scan_hits.clear()
+            self.combo_motor.clear()
+            self.combo_motor.addItem("Select Motor")
             # 수신 스레드
             self.reader_stop.clear()
             self.reader_thread = CANReaderThread(
@@ -65,11 +73,9 @@ class CANHandlersMixin:
             )
             self.reader_thread.start()
 
-            self.btn_connect.setEnabled(False)
-            self.btn_disconnect.setEnabled(True)
-            self._log(f"Connected: iface={iface}, channel={channel}, bitrate={bitrate}")
-            if hasattr(self, "scan_hits"):
-                self.scan_hits.clear()
+            self._set_connection_controls(True)
+            setting = "bitrate=OS-managed" if iface == "socketcan" else f"bitrate={bitrate}"
+            self._log(f"Connected: iface={iface}, channel={channel}, {setting}")
             if hasattr(self, "scan_timer"):
                 self._start_scan()
                 self.scan_timer.start(200)
@@ -77,32 +83,46 @@ class CANHandlersMixin:
                 QtCore.QTimer.singleShot(300, self._start_param_read)
         except Exception as e:
             self._log(f"Connect 실패: {e}")
+            if self.manager.bus is not None:
+                self._on_disconnect()
 
     def _on_disconnect(self):
+        if self._disconnect_thread is not None:
+            return
+        self._stop_reference()
+        self.scan_stop.set()
+        self.scan_timer.stop()
+        self.reader_stop.set()
+        if self.manager.writer:
+            self.manager.writer.stop()
+        if self.capture:
+            self.capture.stop()
+        self.read_pending = False
+        self.param_read_queue.clear()
+        with self.read_lock:
+            for key in self.read_watch:
+                self.read_watch[key] = None
         if self.manager.bus is None:
             return
-        try:
-            self.reader_stop.set()
-            if self.reader_thread:
-                self.reader_thread.join(timeout=1.0)
-        except Exception:
-            pass
-        try:
-            self.manager.disconnect()
-        finally:
-            if hasattr(self, "scan_stop"):
-                self.scan_stop.set()
-            if hasattr(self, "scan_timer"):
-                self.scan_timer.stop()
-            self.reader_thread = None
-            self.btn_connect.setEnabled(True)
-            self.btn_disconnect.setEnabled(False)
-            self._set_error_code(0)
-            self._rx_count = 0
-            self._tx_count = 0
-            self._last_rate_ts = time.time()
-            self._update_rate_label(force=True)
-            self._log("Disconnected")
+        self.btn_connect.setEnabled(False)
+        self.btn_disconnect.setEnabled(False)
+        self.btn_record.setEnabled(False)
+        self._disconnect_error = None
+        reader, scan = self.reader_thread, self.scan_thread
+
+        def cleanup():
+            try:
+                if scan:
+                    scan.join(timeout=1.0)
+                if reader:
+                    reader.join(timeout=1.0)
+                self.manager.disconnect()
+            except Exception as exc:
+                self._disconnect_error = str(exc)
+
+        self._disconnect_thread = threading.Thread(target=cleanup, name="can-disconnect", daemon=True)
+        self._disconnect_thread.start()
+        self.lbl_rate.setText("Disconnected / stopping workers...")
 
     # ------------- 쓰기 -------------
     def _on_write(self):
@@ -121,14 +141,24 @@ class CANHandlersMixin:
             eid = build_ext_id(mode_id, driver_id)
             payload = pack_command_payload(mode_id, value)
             self.manager.send_ext(eid, payload)
-            self._tx_count += 1
-            self._log(f"Write OK: EID=0x{eid:08X}, mode={mode_id}, driver={driver_id}, value={value}")
+            self._log(f"Write queued: EID=0x{eid:08X}, mode={mode_id}, driver={driver_id}, value={value}")
         except Exception as e:
             self._log(f"Write 실패: {e}")
 
     # ------------- 수신/그래프 -------------
     def _drain_and_update(self):
+        self._poll_background()
+        if self._disconnect_thread is not None:
+            return
+        if self.reader_thread and self.reader_thread.last_error:
+            self._log(f"RX error: {self.reader_thread.last_error}")
+            self._on_disconnect()
+            return
+        self._collect_reference()
         listen_id = self.spin_listen.value()
+        if listen_id != self._last_listen_id:
+            self._reset_monitor()
+            self._last_listen_id = listen_id
         any_parsed = False
         did_plot_update = False
         last_parsed = None
@@ -146,6 +176,8 @@ class CANHandlersMixin:
                 last_error = last_parsed["error"]
 
         self._update_rate_label()
+        if self._disconnect_thread is not None:
+            return
         self._poll_read_response()
 
         if last_parsed is not None:
@@ -154,6 +186,7 @@ class CANHandlersMixin:
             self.spd_buf.append(last_parsed["spd_erpm"])
             self.cur_buf.append(last_parsed["cur_A"])
             self.tmp_buf.append(last_parsed["temp_C"])
+            self._last_sample_ts = last_ts
             if last_error is not None:
                 self._set_error_code(last_error)
             any_parsed = True
@@ -166,7 +199,7 @@ class CANHandlersMixin:
             else:
                 xs = []
 
-            t_now = time.time()
+            t_now = time.monotonic()
             if (t_now - self._last_plot_ts) >= self._plot_min_dt:
                 self._last_plot_ts = t_now
                 max_points = max(20, int(float(self.spin_timewin.value()) * float(PLOT_MAX_HZ)))
@@ -201,12 +234,33 @@ class CANHandlersMixin:
                     x_end = max(t_end, win)
                     self.vb_pos.setXRange(x_start, x_end, padding=0)
 
-        # Visible 토글
-        self.curve_pos.setVisible(self.cb_pos.isChecked())
-        self.curve_spd.setVisible(self.cb_spd.isChecked())
-        self.curve_cur.setVisible(self.cb_cur.isChecked())
-        self.curve_tmp.setVisible(self.cb_tmp.isChecked())
-        self.curve_ref.setVisible(self.cb_ref_show.isChecked())
+        # Visibility/axis layout changes only when a checkbox or target changes.
+        visibility = tuple(cb.isChecked() for cb in (
+            self.cb_pos, self.cb_spd, self.cb_cur, self.cb_tmp, self.cb_ref_show)) + (self.ref_view,)
+        if visibility != self._last_visibility:
+            for curve, visible in zip((self.curve_pos, self.curve_spd, self.curve_cur,
+                                       self.curve_tmp, self.curve_ref), visibility):
+                curve.setVisible(visible)
+            self._last_visibility = visibility
+            self._update_axes_visibility()
+
+        if self._last_sample_ts and time.monotonic() - self._last_sample_ts > 0.5:
+            self.lbl_error.setText("Error: stale / selected ID not receiving")
+            self.last_error_code = None
+
+        # Reference samples are taken from successful worker transmissions at GUI rate.
+        if self.cb_ref_show.isChecked() and self.t_ref:
+            self._prune_buffers()
+            t0 = self.t_buf[0] if self.t_buf else self.t_ref[0]
+            t_now = time.monotonic()
+            if did_plot_update or (t_now - self._last_plot_ts) >= self._plot_min_dt:
+                self._last_plot_ts = t_now
+                xs_ref = [tr - t0 for tr in self.t_ref]
+                max_points = max(20, int(float(self.spin_timewin.value()) * float(PLOT_MAX_HZ)))
+                x_d, y_d = self._decimate_minmax(xs_ref, list(self.y_ref), max_points)
+                self.curve_ref.setData(x_d, y_d)
+
+    def _update_axes_visibility(self):
         show_spd_axis = self.cb_spd.isChecked() or (
             self.cb_ref_show.isChecked() and self.ref_view == self.vb_spd
         )
@@ -218,27 +272,6 @@ class CANHandlersMixin:
         self.axis_tmp.setVisible(self.cb_tmp.isChecked())
         self.axis_ref.setVisible(self.cb_ref_show.isChecked() and self.ref_view == self.vb_ref)
 
-        # 참조 곡선 갱신
-        if self.cb_ref_show.isChecked() and self.t_ref:
-            if self.t_buf:
-                t0 = self.t_buf[0]
-            else:
-                t0 = self.t_ref[0]
-            xs_ref = [tr - t0 for tr in self.t_ref]
-            if did_plot_update:
-                max_points = max(20, int(float(self.spin_timewin.value()) * float(PLOT_MAX_HZ)))
-                x_d, y_d = self._decimate_minmax(xs_ref, list(self.y_ref), max_points)
-                self.curve_ref.setData(x_d, y_d)
-            else:
-                t_now = time.time()
-                if (t_now - self._last_plot_ts) >= self._plot_min_dt:
-                    self._last_plot_ts = t_now
-                    max_points = max(20, int(float(self.spin_timewin.value()) * float(PLOT_MAX_HZ)))
-                    x_d, y_d = self._decimate_minmax(xs_ref, list(self.y_ref), max_points)
-                    self.curve_ref.setData(x_d, y_d)
-        else:
-            self.curve_ref.setData([], [])
-
     def _on_calib(self):
         """캘리브레이션 트리거(Write-only). mode_id=6, 8바이트 0 패딩."""
         if self.manager.bus is None:
@@ -249,8 +282,7 @@ class CANHandlersMixin:
             eid = build_ext_id(MODE_CALIBRATION, driver_id)
             payload = pack_calibration_payload()
             self.manager.send_ext(eid, payload)
-            self._tx_count += 1
-            self._log(f"Calibration sent: EID=0x{eid:08X}, driver={driver_id}")
+            self._log(f"Calibration queued: EID=0x{eid:08X}, driver={driver_id}")
         except Exception as e:
             self._log(f"Calibration 실패: {e}")
 
@@ -267,7 +299,6 @@ class CANHandlersMixin:
             eid = build_ext_id(MODE_COGGING_COMPENSATION, driver_id)
             payload = raw.to_bytes(4, byteorder="big", signed=True) + b"\x00" * 4
             self.manager.send_ext(eid, payload)
-            self._tx_count += 1
             self.btn_cogging.setText("Stop Cogging" if start else "Start Cogging")
             self.spin_cogging_rpm.setEnabled(not start)
             if start:
@@ -291,7 +322,6 @@ class CANHandlersMixin:
             eid = build_ext_id(MODE_COGGING_TOGGLE, driver_id)
             payload = bytes([1 if checked else 0]) + b"\x00" * 7
             self.manager.send_ext(eid, payload)
-            self._tx_count += 1
             self.btn_cogging_comp.setText(
                 "Cogging Comp: ON" if checked else "Cogging Comp: OFF"
             )
@@ -303,67 +333,55 @@ class CANHandlersMixin:
             self._log(f"Cogging toggle failed: {e}")
 
     def _on_ref_toggle(self):
-        """참조파 시작/정지 토글"""
-        if not self.ref_running:
-            # 시작
-            if self.manager.bus is None:
-                self._log("참조 시작 실패: 버스 미연결")
-                return
-            # 버퍼 리셋 및 기준 시간 기록
-            self.t_ref.clear()
-            self.y_ref.clear()
-            self.ref_t0 = time.time()
-            self.ref_running = True
-            self.btn_ref_toggle.setText("Stop Ref")
-            # 안내
-            mode_id = self.combo_mode.currentData()
-            shape = self.combo_shape.currentText()
-            amp = float(self.spin_amp.value()); freq = float(self.spin_freq.value())
-            unit = "A" if mode_id == MODE_CURRENT else ("eRPM" if mode_id == MODE_VELOCITY else "")
-            self._log(f"Ref 시작: shape={shape}, amp={amp}{unit}, f={freq}Hz, mode={mode_id}")
-        else:
-            # 정지
-            self.ref_running = False
-            self.btn_ref_toggle.setText("Start Ref")
-            self._log("Ref 정지")
-
-    def _on_ref_tick(self):
-        """REF_SEND_HZ 주기로 참조 값을 계산·전송하고, 버퍼를 쌓는다."""
-        if not self.ref_running:
+        if self.ref_running:
+            self._stop_reference()
+            self._log("Ref 정지 (주기 송신 중단)")
             return
-        if self.manager.bus is None:
+        if self.manager.writer is None or self._disconnect_thread is not None:
+            self._log("참조 시작 실패: 버스 미연결")
             return
-
-        # 시간/파형 파라미터
-        t_now = time.time()
-        t = t_now - (self.ref_t0 or t_now)
-        amp = float(self.spin_amp.value())
-        freq = float(self.spin_freq.value())
-        shape = self.combo_shape.currentText()
-
-        # 파형 계산
-        if shape == "Sine":
-            val = sine(t, amp, freq)
-        elif shape == "Triangle":
-            val = triangle(t, amp, freq)
-        else:  # "Square"
-            val = square(t, amp, freq)
-
-        # 송신: 현재 선택된 Mode/Driver 사용
-        driver_id = self.spin_driver.value()
-        mode_id = self.combo_mode.currentData()
         try:
-            eid = build_ext_id(mode_id, driver_id)
-            payload = pack_command_payload(mode_id, val)  # 단위: A 또는 eRPM
-            self.manager.send_ext(eid, payload)
-            self._tx_count += 1
+            command = self._reference_command()
+            self.manager.writer.set_periodic(command, self.spin_tx_hz.value())
         except Exception as e:
-            # 송신 실패시 로그만 남기고 계속 시도
-            self._log(f"Ref 송신 오류: {e}")
+            self._log(f"Ref 시작 실패: {e}")
             return
+        self.t_ref.clear()
+        self.y_ref.clear()
+        self.curve_ref.setData([], [])
+        self.ref_running = True
+        self.btn_ref_toggle.setText("Stop Ref")
+        self.spin_tx_hz.setEnabled(False)
+        self._log(f"Ref 시작: {command.shape}, target {self.spin_tx_hz.value()} Hz")
 
-        # 참조 버퍼 기록(그래프 표시용)
-        if (t_now - self._last_ref_plot_ts) >= self._ref_plot_min_dt:
-            self._last_ref_plot_ts = t_now
-            self.t_ref.append(t_now)
-            self.y_ref.append(val)
+    def _reference_command(self):
+        # Only the GUI reads widgets. The worker receives an immutable snapshot.
+        return ReferenceCommand(self.spin_driver.value(), self.combo_mode.currentData(),
+                                self.combo_shape.currentText(), self.spin_amp.value(),
+                                self.spin_freq.value())
+
+    def _on_ref_parameters_changed(self, *_):
+        if self.ref_running and self.manager.writer:
+            try:
+                self.manager.writer.update_periodic(self._reference_command())
+            except Exception as exc:
+                self._stop_reference()
+                self._log(f"Ref parameter error: {exc}")
+
+    def _stop_reference(self):
+        if self.manager.writer:
+            self.manager.writer.stop_periodic()
+        self.ref_running = False
+        self.btn_ref_toggle.setText("Start Ref")
+        self.spin_tx_hz.setEnabled(True)
+
+    def _collect_reference(self):
+        if self.manager.writer is None:
+            return
+        sample = self.manager.writer.take_reference()
+        if sample is not None:
+            stamp, value = sample
+            self.t_ref.append(stamp)
+            self.y_ref.append(value)
+        if self.ref_running and not self.manager.writer.periodic_active():
+            self._stop_reference()

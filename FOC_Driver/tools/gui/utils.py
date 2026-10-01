@@ -35,7 +35,7 @@ class UtilsMixin:
             self._log(f"Motor list update error: {e}")
 
     def _update_rate_label(self, force: bool = False):
-        now = time.time()
+        now = time.monotonic()
         dt = now - self._last_rate_ts
         if not force and dt < 1.0:
             return
@@ -47,9 +47,14 @@ class UtilsMixin:
             rx_count = self._rx_count
             self._rx_count = 0
         rx_hz = rx_count / dt
-        tx_hz = self._tx_count / dt
+        tx_count, skipped, errors = self.manager.writer.take_stats() if self.manager.writer else (0, 0, [])
+        tx_hz = tx_count / dt
+        self.lbl_tx_health.setText(f"TX skipped: {skipped} (last {dt:.1f}s)")
+        if errors:
+            self._log(f"TX stopped: {errors[-1]} ({len(errors)} errors)")
+            if self.manager.writer.stop_event.is_set():
+                self._on_disconnect()
         self.lbl_rate.setText(f"Rate: RX {rx_hz:.1f} Hz / TX {tx_hz:.1f} Hz")
-        self._tx_count = 0
         self._last_rate_ts = now
 
     def _set_error_code(self, error_code: int):
@@ -109,8 +114,7 @@ class UtilsMixin:
             payload = self._pack_value_32(value_str, value_type)
             eid = build_ext_id(func_id, motor_id)
             self.manager.send_ext(eid, payload)
-            self._tx_count += 1
-            self._log(f"Raw Send OK: EID=0x{eid:08X}, type={value_type}, value={value_str}")
+            self._log(f"Raw Send queued: EID=0x{eid:08X}, type={value_type}, value={value_str}")
         except Exception as e:
             self._log(f"Raw Send 실패: {e}")
 
@@ -136,11 +140,10 @@ class UtilsMixin:
             self.read_watch["func_id"] = base_func_id
             self.read_watch["tag"] = "manual"
         self.read_pending = True
-        self.read_deadline = time.time() + 0.5
+        self.read_deadline = time.monotonic() + 0.5
         self.lbl_read_value.setText("Read: (waiting)")
         try:
             self.manager.send_ext(req_eid, b"\x00" * 8)
-            self._tx_count += 1
             self._log(f"Read 요청: EID=0x{req_eid:08X}, type={self.read_type}")
         except Exception as e:
             self._log(f"Read 실패: {e}")
@@ -169,7 +172,7 @@ class UtilsMixin:
         self.read_retry_left = retries
         self.read_param_current = base_func_id
         self.read_pending = True
-        self.read_deadline = time.time() + 0.5
+        self.read_deadline = time.monotonic() + 0.5
         try:
             self.manager.send_ext(build_ext_id(req_func_id, motor_id), b"\x00" * 8)
         except Exception:
@@ -209,7 +212,7 @@ class UtilsMixin:
             if tag == "param":
                 self._request_next_param_read()
             return
-        if time.time() > self.read_deadline:
+        if time.monotonic() > self.read_deadline:
             if tag == "manual":
                 self.lbl_read_value.setText("Read: timeout")
             self.read_pending = False
@@ -281,8 +284,7 @@ class UtilsMixin:
             self.manager.send_ext(build_ext_id(0x11, motor_id), payload_bw)
             self.manager.send_ext(build_ext_id(0x20, motor_id), payload_kp)
             self.manager.send_ext(build_ext_id(0x21, motor_id), payload_ki)
-            self._tx_count += 3
-            self._log(f"Ctrl Params sent: BW={bw}, KP={kp}, KI={ki}")
+            self._log(f"Ctrl Params queued: BW={bw}, KP={kp}, KI={ki}")
         except Exception as e:
             self._log(f"Ctrl Params 실패: {e}")
 
@@ -293,7 +295,6 @@ class UtilsMixin:
         motor_id = self.spin_driver.value()
         try:
             self.manager.send_ext(build_ext_id(0x10, motor_id), b"\x00" * 8)
-            self._tx_count += 1
-            self._log("Flash update sent")
+            self._log("Flash update queued")
         except Exception as e:
             self._log(f"Flash update 실패: {e}")

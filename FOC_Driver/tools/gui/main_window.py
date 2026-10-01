@@ -9,7 +9,6 @@ import sys
 if __package__ in (None, ""):
     sys.path.append(os.path.dirname(os.path.dirname(__file__)))
     from gui.deps import (
-        REF_SEND_HZ,
         MAX_POINTS, UPDATE_INTERVAL_MS, PLOT_MAX_HZ,
         CANBusManager
     )
@@ -17,9 +16,9 @@ if __package__ in (None, ""):
     from gui.plot_helpers import PlotHelperMixin
     from gui.can_handlers import CANHandlersMixin
     from gui.utils import UtilsMixin
+    from gui.connection_handlers import ConnectionHandlersMixin
 else:
     from .deps import (
-        REF_SEND_HZ,
         MAX_POINTS, UPDATE_INTERVAL_MS, PLOT_MAX_HZ,
         CANBusManager
     )
@@ -27,6 +26,7 @@ else:
     from .plot_helpers import PlotHelperMixin
     from .can_handlers import CANHandlersMixin
     from .utils import UtilsMixin
+    from .connection_handlers import ConnectionHandlersMixin
 
 
 class MainWindow(
@@ -35,30 +35,28 @@ class MainWindow(
     PlotHelperMixin,
     CANHandlersMixin,
     UtilsMixin,
+    ConnectionHandlersMixin,
 ):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("FD CAN Slave Monitor/Control (CANable)")
+        self.setWindowTitle("MA732 CAN Monitor/Control")
         self.resize(1400, 850)
         self.t_ref = deque(maxlen=MAX_POINTS)
         self.y_ref = deque(maxlen=MAX_POINTS)
         self.ref_running = False
-        self.ref_t0 = None
-        self._last_ref_plot_ts = 0.0
-        self._ref_plot_min_dt = 1.0 / 100.0  # limit ref plot samples to 100 Hz
         self._last_plot_ts = 0.0
         self._plot_min_dt = 1.0 / max(1.0, float(PLOT_MAX_HZ))
         self._last_sample_ts = 0.0
         self.ref_view = None
 
-        # 참조 전송/샘플 타이머
-        self.ref_timer = QtCore.QTimer(self)
-        self.ref_timer.setTimerType(QtCore.Qt.PreciseTimer)
-        self.ref_timer.timeout.connect(self._on_ref_tick)
-        self.ref_timer.start(int(1000.0 / max(1.0, float(REF_SEND_HZ))))
-
         # CAN
         self.manager = CANBusManager()
+        self.capture = None
+        self._disconnect_thread = None
+        self._disconnect_error = None
+        self._closing = False
+        self._last_listen_id = None
+        self._last_visibility = None
         self.reader_stop = threading.Event()
         self.reader_thread = None
         self.scan_hits = set()
@@ -91,11 +89,11 @@ class MainWindow(
         self.tmp_buf = deque(maxlen=MAX_POINTS)
         self.last_error_code = None
         self._rx_count = 0
-        self._tx_count = 0
-        self._last_rate_ts = time.time()
+        self._last_rate_ts = time.monotonic()
 
         self._build_ui()
         self._apply_style()
+        self._on_interface_changed()
 
         # 타이머
         self.timer = QtCore.QTimer(self)
@@ -103,5 +101,13 @@ class MainWindow(
         self.timer.start(UPDATE_INTERVAL_MS)
 
     def closeEvent(self, e):
-        self._on_disconnect()
+        self._closing = True
+        if self.manager.bus is not None or self._disconnect_thread is not None:
+            self._on_disconnect()
+            e.ignore()
+            return
+        if self.capture is not None and not self.capture.done.is_set():
+            self.capture.stop()
+            e.ignore()
+            return
         super().closeEvent(e)

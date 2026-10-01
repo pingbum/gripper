@@ -107,7 +107,6 @@ class MonitorTests(unittest.TestCase):
             with self.subTest(order=order):
                 window = MainWindow()
                 window.timer.stop()
-                window.ref_timer.stop()
                 window.scan_timer.stop()
                 window.reader_thread = receive([status(driver, 10 + driver) for driver in order])
                 for driver in order:

@@ -9,7 +9,8 @@ class PlotHelperMixin:
         if not self.t_buf and not self.t_ref:
             return
         win = float(self.spin_timewin.value())
-        latest = self.t_buf[-1] if self.t_buf else self.t_ref[-1]
+        latest = max(self.t_buf[-1] if self.t_buf else float('-inf'),
+                     self.t_ref[-1] if self.t_ref else float('-inf'))
         cutoff = latest - win
         while self.t_buf and self.t_buf[0] < cutoff:
             self.t_buf.popleft()
