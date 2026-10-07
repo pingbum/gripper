@@ -5,12 +5,14 @@ or test electrical CAN/SPI behavior. The functions are extracted unchanged from
 the source so no second copy of startup logic is maintained by the test.
 """
 from pathlib import Path
+import os
 import re
+import shlex
 import subprocess
 import tempfile
 
 root = Path(__file__).resolve().parents[2]
-source = (root / 'Application/Setup/Src/main_cpp.cpp').read_text()
+source = (root / 'Application/Setup/Src/main_cpp.cpp').read_text(encoding='utf-8')
 
 
 def function(signature):
@@ -128,7 +130,8 @@ int main() {
 '''
 with tempfile.TemporaryDirectory(prefix='slave-startup-test-') as folder:
     cpp = Path(folder) / 'startup_test.cpp'
-    exe = Path(folder) / 'startup_test'
-    cpp.write_text(harness + constants + '\n' + driver + stubs + '\n' + fault + '\n' + body + '\n' + checks)
-    subprocess.run(['g++', '-std=c++20', '-Wall', '-Wextra', '-Werror', str(cpp), '-o', str(exe)], check=True)
+    exe = Path(folder) / ('startup_test.exe' if os.name == 'nt' else 'startup_test')
+    cpp.write_text(harness + constants + '\n' + driver + stubs + '\n' + fault + '\n' + body + '\n' + checks, encoding='utf-8')
+    compiler = shlex.split(os.environ.get('CXX', 'g++'))
+    subprocess.run(compiler + ['-std=c++20', '-Wall', '-Wextra', '-Werror', str(cpp), '-o', str(exe)], check=True)
     subprocess.run([str(exe)], check=True)

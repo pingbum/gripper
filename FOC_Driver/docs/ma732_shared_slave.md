@@ -1,8 +1,13 @@
-# MA732 공유 엔코더 Slave 펌웨어
+# MA732 공유 엔코더 Slave 펌웨어 — CAN FD
 
 이 폴더는 STM32G474 Slave 보드용이다. PCB 패턴 변경 없이 외부 케이블로
 아래 신호를 연결한다. 엔코더 MISO가 Slave PB4로만 연결돼 있다면 이 코드로
 수신할 수 없다. 반드시 Slave PB5로 신호가 들어와야 한다.
+
+CAN은 ISO CAN FD + BRS, arbitration 1 Mbit/s / data 5 Mbit/s를 사용한다.
+운용 motor ID는 Master **1**, Slave **2**이다. Slave는 유효한 Flash ID가
+없을 때만 기본값 2를 사용하며, 기존에 저장된 ID나 보정값을 덮어쓰지 않는다.
+FD 상태 송신과 파라미터 응답 검증은 [CAN FD 점검 문서](can_fd_bringup.md)를 참고한다.
 
 | Slave 핀 | 기능 | 연결 |
 | --- | --- | --- |
@@ -88,7 +93,7 @@ CAN과 상태 송신용 TIM17은 엔코더/DRV 초기화 전에 시작한다. �
 | `can_status_tx_queued` | 상태 프레임이 FDCAN 송신 큐에 등록된 횟수. 실제 ACK 확인 횟수는 아님 |
 | `can_status_tx_errors` | 상태 송신 큐 등록 실패 횟수 |
 | `can_rx_frames` | RX FIFO1에서 꺼낸 프레임 수. 다른 ID의 프레임도 포함 |
-| `s_driver_id` | 현재 CAN ID. 저장된 Flash 값이 우선하며 미설정 시 기본값은 `0x00` |
+| `s_driver_id` | 현재 CAN ID. 저장된 Flash 값이 우선하며 미설정 시 Slave 기본값은 `0x02` |
 | `state.error_flags.can_error` / `hfdcan1.ErrorCode` | CAN 오류 상태 |
 
 Master와 Slave는 서로 다른 CAN ID를 사용해야 한다. 같은 ID이면 상태 송신이
@@ -100,14 +105,15 @@ Master와 Slave는 서로 다른 CAN ID를 사용해야 한다. 같은 ID이면 
 ## 검증
 
 ```sh
-g++ -std=c++20 -Wall -Wextra -Werror \
-  -Itests/ma732_slave/mocks -IApplication/Sensor/Inc \
-  tests/ma732_slave/receiver_test.cpp -o /tmp/ma732-slave-test
-/tmp/ma732-slave-test
-python3 tests/startup/run_test.py
+python -B tests/ma732_slave/run_test.py
+python -B tests/startup/run_test.py
+python -B -m unittest discover -s tests/can_fd -p "test_*.py"
 cmake --preset Debug
 cmake --build --preset Debug -j 8
 ```
+
+수신기/초기화 테스트는 호스트 C++20 컴파일러가 필요하다. 기본 명령은 `g++`이며,
+환경변수 `CXX`로 다른 컴파일러 명령을 지정할 수 있다. ARM 펌웨어 빌드와는 별도다.
 
 호스트 테스트는 실제 수신기 코드를 모의 레지스터로 실행한다. 정상 수신,
 부팅 중 프레임, 불완전/초과 워드, DMA/SPI 오류, 늦은 CS 처리, 타임아웃,
@@ -134,7 +140,11 @@ CS를 해제하고 SPI·DMA를 중단하며, 불완전한 수신값을 사용하
 
 ## PC 모니터에서 두 CAN ID 확인
 
-이 프로젝트의 `tools/app.py`는 CAN 상태를 드라이버 ID별로 하나씩 보관한다.
+이 프로젝트의 `tools/app.py`는 아직 CAN FD 설정/송신으로 이식되지 않았다.
+FD 실기 점검에는 `tools/can_fd_check.py --ids 1 2`와 FD 지원 어댑터를 사용한다.
+아래는 기존 GUI의 수신 처리에 관한 설명이다.
+
+`tools/app.py`는 CAN 상태를 드라이버 ID별로 하나씩 보관한다.
 기존 공용 1칸 큐에서는 나중에 도착한 다른 ID의 프레임이 앞선 프레임을 지워
 두 보드 연결 시 한쪽 그래프가 끊길 수 있었다. 이제 선택한 Listen Driver ID의
 새 상태만 화면에 반영하며, 같은 ID의 이전 샘플만 최신 샘플로 교체한다.
