@@ -11,6 +11,13 @@
 
 extern State_t state;
 
+// Debugger counters. Queued TX means accepted by FDCAN, not bus ACK.
+volatile uint32_t can_status_tx_queued = 0;
+volatile uint32_t can_status_tx_errors = 0;
+volatile uint32_t can_rx_frames = 0;
+volatile uint32_t can_rx_fd_brs_frames = 0;
+volatile uint32_t can_rx_rejected_frames = 0;
+
 namespace {
 constexpr uint8_t DEFAULT_DRIVER_ID = 0x00; // Default motor/driver ID.
 constexpr uint32_t CAN_ID_CONFIG_MAGIC =
@@ -84,7 +91,7 @@ static void send_param_response(uint8_t driver_id, uint8_t mode_id,
                                     .TxFrameType = FDCAN_DATA_FRAME,
                                     .DataLength = dlc_from_len(length),
                                     .ErrorStateIndicator = FDCAN_ESI_ACTIVE,
-                                    .BitRateSwitch = FDCAN_BRS_OFF,
+                                    .BitRateSwitch = FDCAN_BRS_ON,
                                     .FDFormat = FDCAN_FD_CAN,
                                     .TxEventFifoControl = FDCAN_NO_TX_EVENTS,
                                     .MessageMarker = 0};
@@ -335,26 +342,19 @@ static void handle_rx_message(const FDCAN_RxHeaderTypeDef &rxh,
 
 void CAN_Handler::FDCAN1_SetupFiltersAndStart(void) {
   load_driver_id_from_flash();
-  // 1) Start FDCAN (required after init to enable the bus).
-  if (HAL_FDCAN_Start(&hfdcan1) != HAL_OK) {
+  // Configure protected registers while HAL is READY, before starting FDCAN.
+  // ST's G4 example recommends DataTimeSeg1 * DataPrescaler, in kernel clocks.
+  // At 170 MHz, data prescaler 2 / seg1 12 gives TDCO = 24; TDCF = 0.
+  const uint32_t tdc_offset =
+      hfdcan1.Init.DataTimeSeg1 * hfdcan1.Init.DataPrescaler;
+  if (tdc_offset > 127U ||
+      HAL_FDCAN_ConfigTxDelayCompensation(&hfdcan1, tdc_offset, 0) != HAL_OK ||
+      HAL_FDCAN_EnableTxDelayCompensation(&hfdcan1) != HAL_OK) {
     Error_Raise(ERROR_CAN);
+    return;
   }
 
-  //   // 2) Standard ID filter: accept only 0x321 (mask filter, exact match).
-  //   FDCAN_FilterTypeDef stdFilter{};
-  //   stdFilter.IdType = FDCAN_STANDARD_ID;
-  //   stdFilter.FilterIndex = 0;
-  //   stdFilter.FilterType = FDCAN_FILTER_MASK;
-  //   stdFilter.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
-  //   stdFilter.FilterID1 = 0x321; // ID to filter.
-  //   stdFilter.FilterID2 =
-  //       0x7FF; // Mask: compare all bits for an exact match.
-  //   if (HAL_FDCAN_ConfigFilter(&hfdcan1, &stdFilter) != HAL_OK) {
-  //     state.error_flags.can_error = true;
-  //     Error_Handler();
-  //   }
-
-  // 2) Standard ID filter: receive CAN ID set command.
+  // Standard ID filter: receive CAN ID set command.
   FDCAN_FilterTypeDef stdFilter{};
   stdFilter.IdType = FDCAN_STANDARD_ID;
   stdFilter.FilterIndex = 0;
@@ -364,9 +364,10 @@ void CAN_Handler::FDCAN1_SetupFiltersAndStart(void) {
   stdFilter.FilterID2 = 0x7FFu; // Allow only the exact ID.
   if (HAL_FDCAN_ConfigFilter(&hfdcan1, &stdFilter) != HAL_OK) {
     Error_Raise(ERROR_CAN);
+    return;
   }
 
-  // 3) Extended ID filter: accept all, then filter in software.
+  // Extended ID filter: accept all, then filter in software.
   FDCAN_FilterTypeDef extFilter{};
   extFilter.IdType = FDCAN_EXTENDED_ID;
   extFilter.FilterIndex = 0;
@@ -376,13 +377,25 @@ void CAN_Handler::FDCAN1_SetupFiltersAndStart(void) {
   extFilter.FilterID2 = 0x00000000u; // Mask: allow all extended IDs.
   if (HAL_FDCAN_ConfigFilter(&hfdcan1, &extFilter) != HAL_OK) {
     Error_Raise(ERROR_CAN);
+    return;
   }
 
-  // 4) Enable RX notifications for FIFO0 and FIFO1.
+  // No unhandled fallback into FIFO0; remote frames are not commands.
+  if (HAL_FDCAN_ConfigGlobalFilter(&hfdcan1, FDCAN_REJECT, FDCAN_REJECT,
+                                   FDCAN_REJECT_REMOTE,
+                                   FDCAN_REJECT_REMOTE) != HAL_OK) {
+    Error_Raise(ERROR_CAN);
+    return;
+  }
+
+  // Arm RX before starting, so no traffic is accepted before setup completes.
   if (HAL_FDCAN_ActivateNotification(&hfdcan1,
-                                     FDCAN_IT_RX_FIFO0_NEW_MESSAGE |
-                                         FDCAN_IT_RX_FIFO1_NEW_MESSAGE,
+                                     FDCAN_IT_RX_FIFO1_NEW_MESSAGE,
                                      0) != HAL_OK) {
+    Error_Raise(ERROR_CAN);
+    return;
+  }
+  if (HAL_FDCAN_Start(&hfdcan1) != HAL_OK) {
     Error_Raise(ERROR_CAN);
   }
 }
@@ -399,11 +412,27 @@ extern "C" void HAL_FDCAN_RxFifo1Callback(FDCAN_HandleTypeDef *hfdcan,
 
   while (HAL_FDCAN_GetRxFifoFillLevel(hfdcan, FDCAN_RX_FIFO1) > 0) {
     FDCAN_RxHeaderTypeDef rxh;
-    uint8_t data[8];
+    // HAL copies the complete DLC payload before software can inspect it.
+    // This is an RX scratch buffer, not a change to the 8-byte wire protocol.
+    uint8_t data[64] = {};
 
     if (HAL_FDCAN_GetRxMessage(hfdcan, FDCAN_RX_FIFO1, &rxh, data) != HAL_OK)
       break;
 
+    can_rx_frames = can_rx_frames + 1U;
+    if (rxh.FDFormat == FDCAN_FD_CAN && rxh.BitRateSwitch == FDCAN_BRS_ON)
+      can_rx_fd_brs_frames = can_rx_fd_brs_frames + 1U;
+
+    // Keep existing 0-byte read/reset requests and 1/4/8-byte payloads.
+    // Reject invalid lengths before any command (including reset/flash writes).
+    if (rxh.RxFrameType != FDCAN_DATA_FRAME ||
+        (rxh.DataLength != FDCAN_DLC_BYTES_0 &&
+         rxh.DataLength != FDCAN_DLC_BYTES_1 &&
+         rxh.DataLength != FDCAN_DLC_BYTES_4 &&
+         rxh.DataLength != FDCAN_DLC_BYTES_8)) {
+      can_rx_rejected_frames = can_rx_rejected_frames + 1U;
+      continue;
+    }
     handle_rx_message(rxh, data);
   }
 
@@ -443,8 +472,8 @@ void CAN_Handler::broadcast_motor_status(float position_deg, float speed_erpm,
       .TxFrameType = FDCAN_DATA_FRAME,
       .DataLength = FDCAN_DLC_BYTES_8, // 8 bytes.
       .ErrorStateIndicator = FDCAN_ESI_ACTIVE,
-      .BitRateSwitch = FDCAN_BRS_OFF, // Classic CAN.
-      .FDFormat = FDCAN_CLASSIC_CAN,
+      .BitRateSwitch = FDCAN_BRS_ON,
+      .FDFormat = FDCAN_FD_CAN,
       .TxEventFifoControl = FDCAN_NO_TX_EVENTS,
       .MessageMarker = 0};
   uint8_t tx_data[8];
@@ -471,6 +500,9 @@ void CAN_Handler::broadcast_motor_status(float position_deg, float speed_erpm,
   tx_data[7] = error_code; // Error code
 
   if (HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &txHeader, tx_data) != HAL_OK) {
+    can_status_tx_errors = can_status_tx_errors + 1U;
     Error_Raise(ERROR_CAN);
+  } else {
+    can_status_tx_queued = can_status_tx_queued + 1U;
   }
 }
