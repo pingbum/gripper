@@ -1,0 +1,6 @@
+# Common Windows/Linux GUI environment (Python 3.11+).
+python-can==4.6.1
+pyserial==3.5
+PyQt5==5.15.11
+pyqtgraph==0.13.7
+numpy>=2.0,<3

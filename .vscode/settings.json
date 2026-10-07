@@ -1,0 +1,3 @@
+{
+    "cmake.sourceDirectory": "${workspaceFolder}/FOC_Driver_MA732/FOC_Driver"
+}

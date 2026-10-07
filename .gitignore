@@ -1,1 +1,12 @@
-.vscode/
+# Workspace-local artifacts
+debug.log
+df
+
+# Generated build output
+**/build/
+**/Debug/
+
+# Keep only the portable workspace-level VS Code setting.
+**/.vscode/
+!/.vscode/
+!/.vscode/settings.json
