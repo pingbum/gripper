@@ -1,11 +1,10 @@
-#include "error_handler.hpp"
 #include "position.hpp"
-#include "encoder_calibration.hpp" // Use the new refactored calibration class
-#include "current_loop.hpp"        // For flux_control
 #include "arm_math.h"
-#include "flash_memory.hpp"
-#include "memory_constants.hpp"
 #include <cmath>
+
+// Electrical offset of the slave relative to the master [deg, electrical].
+// Positive value leads the master. Editable at runtime via debugger.
+volatile float32_t slave_elec_offset_deg = -122.7f;
 
 namespace
 {
@@ -34,48 +33,16 @@ namespace
 void initializePosition(position_instance_f32_t *s, uint8_t polepairs,
                         MA732_t &encoder)
 {
-    // The motor control function is passed to the calibrator to decouple modules.
-    auto motor_control_func = [](float32_t angle)
-    {
-        flux_control(angle);
-    };
-
-    EncoderCalibrator_t calibrator(encoder, motor_control_func);
-    calibrator.set_offset_buffer(s->theta_e_offset, NUM_SAMPLES);
-
-    bool calibration_available = false;
-
-    if (FLASH_UPDATE == ENCODER_CALIBRATION_MARKER)
-    {
-        calibration_available = calibrator.load_from_flash();
-    }
-    else if (FLASH_UPDATE == 0U)
-    {
-        // A zero marker is written only by the explicit CAN calibration
-        // command. Blank or legacy flash data must not start calibration.
-        calibrator.run(polepairs, NUM_SAMPLES, WINDOW_SIZE);
-        if (Error_IsActive()) return;
-        calibration_available = true;
-        if (calibrator.save_to_flash())
-            FLASH_UPDATE = ENCODER_CALIBRATION_MARKER;
-    }
-
-    if (calibration_available)
-    {
-        calibrator.get_offset_table(s->theta_e_offset, NUM_SAMPLES);
-        s->direction = calibrator.get_direction();
-    }
-    else
-    {
-        // No MA732 calibration data: use raw mechanical angle without an
-        // electrical offset until calibration is explicitly requested.
-        for (uint32_t i = 0; i < NUM_SAMPLES; ++i)
-            s->theta_e_offset[i] = 0.0f;
-        s->direction = 1.0f;
-    }
-
+    // Slave uses the master encoder angle plus slave_elec_offset_deg only.
+    // Encoder calibration (open-loop sweep) and the flash LUT are skipped.
+    (void)encoder;
+    for (uint32_t i = 0; i < NUM_SAMPLES; ++i)
+        s->theta_e_offset[i] = 0.0f;
+    // Slave phases are wired A-C-B relative to the master (A-B-C), so the
+    // electrical angle rotates opposite to the master's.
+    s->direction = -1.0f;
     s->p = static_cast<float32_t>(polepairs);
-} 
+}
 
 void updatePositionMech(position_instance_f32_t *s,
                         float32_t angle_deg,
@@ -105,13 +72,11 @@ void updatePositionMech(position_instance_f32_t *s,
     s->theta_m_prev = angle_signed;
     s->theta_m = wrap_0_360_f32(angle_signed);
 
-    float32_t theta_e_raw = s->p * s->theta_m;
-    uint32_t index = static_cast<uint32_t>(theta_e_raw / (360.0f * s->p / static_cast<float32_t>(numSamples)));
-    if (index >= numSamples)
-        index = numSamples - 1;
-
+    // Slave commutation: master encoder angle + constant electrical offset.
+    // The calibration LUT is not used.
+    (void)numSamples;
     s->theta_e_save =
-        s->direction * (s->p * s->theta_m - s->theta_e_offset[index]);
+        s->direction * (s->p * s->theta_m) + slave_elec_offset_deg;
     s->theta_e = s->theta_e_save;
     s->omega_e = s->direction * s->p * s->omega_m;
 }

@@ -1,5 +1,3 @@
-> 현재 이 폴더는 **MA732 공유 엔코더 Slave** 버전입니다. 핀 연결, Master 타이밍 조건과 수신 방식은 [Slave 구성 문서](docs/ma732_shared_slave.md)를 참고하세요.
-
 LED : 붉은 색->DRV 오류
 LED : 푸른 색 1초 주기 -> 정상 동작
 LED : 푸른 색 항상 동작 -> CAN 오류
@@ -14,7 +12,7 @@ LED : 푸른 색 항상 동작 -> CAN 오류
 
 * **MCU**: STM32G4 시리즈 (고성능 FPU 및 HRTIM 활용).
 * **Driver IC**: TI DRV8316C (SPI 제어 방식).
-* **Encoder**: MA732 (Master가 읽는 16-bit SPI 프레임을 공유 수신).
+* **Encoder**: MA732 (14-bit 자기식 엔코더, 16-bit SPI 프레임).
 * **Communication**: FDCAN1 (실시간 제어 및 데이터 브로드캐스트).
 
 ## 2. 소프트웨어 아키텍처 (Software Features)
@@ -59,16 +57,18 @@ LED : 푸른 색 항상 동작 -> CAN 오류
 | `0x11` | **MODE_SET_CURRENT_BANDWIDTH**| R/W | `float32` | 전류제어 cutoff frequency를 RAM에 저장 |
 | `0x20` | **MODE_SET_VELOCITY_KP** | R/W |`float32` | 속도제어 Kp ram에 저장. |
 | `0x21` | **MODE_SET_VELOCITY_KI** | R/W |`float32` | 속도제어 Ki ram에 저장 |
+| `0x22` | **MODE_SET_POSITION_KP** | R/W |`float32` | 위치제어 Kp [A/deg] ram에 저장. 음수/NaN/Inf 무시 |
+| `0x23` | **MODE_SET_POSITION_KD** | R/W |`float32` | 위치제어 Kd [A·s/deg] ram에 저장. 음수/NaN/Inf 무시 |
 | `0xF0` | **MODE_CAN_BROADCAST_TOGGLE** | W | `uint8` | 0=OFF, 그 외=ON. 데이터가 없으면 토글 |
 | `0xF1` | **MODE_CAN_BROADCAST_RATE** | W | `uint32` | 브로드캐스트 주파수(Hz). 1~1000. 저장 후 flash write + 검증 |
 
 #### 파라미터 읽기 (Read)
-* **Read 가능한 Mode ID**: `0x07`, `0x11`, `0x20`, `0x21`
+* **Read 가능한 Mode ID**: `0x07`, `0x11`, `0x20`, `0x21`, `0x22`, `0x23`
 * **요청 방식**: Mode ID의 MSB(0x80) 세트  
-  예) `0x07 → 0x87`, `0x11 → 0x91`, `0x20 → 0xA0`, `0x21 → 0xA1`
+  예) `0x07 → 0x87`, `0x11 → 0x91`, `0x20 → 0xA0`, `0x21 → 0xA1`, `0x22 → 0xA2`, `0x23 → 0xA3`
 * **응답 포맷**: `ID = (MODE_ID << 8) | MOTOR_ID`, 데이터 = 값  
   - `0x07`: 1바이트 (CAN ID)  
-  - `0x11/0x20/0x21`: 4바이트 BE float32
+  - `0x11/0x20/0x21/0x22/0x23`: 4바이트 BE float32
 
 ### 3.2 상태 Broadcast (Driver → Master, 1kHz base, 1~1000Hz 설정 가능)
 

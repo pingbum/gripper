@@ -8,6 +8,9 @@
 extern "C" {
 #endif
 
+/** Slave electrical offset relative to the master [deg]. Default +18. */
+extern volatile float32_t slave_elec_offset_deg;
+
 /**
  * @brief Initialize position tracking and calibration.
  * @param s Position instance to initialize.

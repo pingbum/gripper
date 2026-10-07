@@ -37,4 +37,21 @@ void velocity_loop_set_ki(float32_t ki);
  */
 void velocity_loop_get_gains(float32_t *kp, float32_t *ki);
 
+/**
+ * @brief Set position proportional gain [A/deg].
+ * @note Only finite, non-negative gains are accepted. Controller state is kept.
+ */
+void position_loop_set_kp(float32_t kp);
+
+/**
+ * @brief Set position derivative gain [A*s/deg].
+ * @note Only finite, non-negative gains are accepted. Controller state is kept.
+ */
+void position_loop_set_kd(float32_t kd);
+
+/**
+ * @brief Get the current position loop gains (no CAN scaling).
+ */
+void position_loop_get_gains(float32_t *kp, float32_t *kd);
+
 #endif // LOW_SPEED_LOOP_HPP
