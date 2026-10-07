@@ -1,0 +1,36 @@
+// Candidate CAN0 TDC prod settings for the inspected Orin NX / L4T 36.4.7.
+// Target path verified in the live device tree. Not installed automatically.
+// NVIDIA recommendation:
+// https://forums.developer.nvidia.com/t/canfd-transmission-failure-at-5mbps-on-orin-nx-16gb-module-tdc-offset-issue/367473/5
+/dts-v1/;
+/plugin/;
+
+/ {
+    fragment@0 {
+        target-path = "/bus@0/mttcan@c310000";
+
+        __overlay__ {
+            prod-settings {
+                #prod-cells = <4>;
+
+                prod_c_can_2m_1m {
+                    board {
+                        prod = <0 0x48 0x7f00 0>;
+                    };
+                };
+
+                prod_c_can_5m {
+                    board {
+                        prod = <0 0x48 0x7f00 0x600>;
+                    };
+                };
+
+                prod_c_can_8m {
+                    board {
+                        prod = <0 0x48 0x7f00 0x400>;
+                    };
+                };
+            };
+        };
+    };
+};

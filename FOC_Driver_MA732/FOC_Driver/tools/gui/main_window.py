@@ -54,6 +54,9 @@ class MainWindow(
         self.capture = None
         self._disconnect_thread = None
         self._disconnect_error = None
+        self._tx_resume_thread = None
+        self._tx_resume_result = None
+        self._tx_resume_writer = None
         self._closing = False
         self._last_listen_id = None
         self._last_visibility = None

@@ -35,9 +35,9 @@ def connection_options(interface, channel):
     return options
 
 
-def read_request(driver_id):
+def read_request(driver_id, brs=True):
     return can.Message(arbitration_id=(READ_ID_MODE << 8) | driver_id,
-                       is_extended_id=True, is_fd=True, bitrate_switch=True,
+                       is_extended_id=True, is_fd=True, bitrate_switch=brs,
                        data=bytes(8), check=True)
 
 
@@ -57,13 +57,38 @@ def classify(message, driver_ids):
     return None
 
 
-def probe(bus, driver_ids, timeout):
+def describe_error(message):
+    """Linux CAN error.h classes/flags; retain raw bytes for driver specifics."""
+    eid, data = message.arbitration_id, bytes(message.data)
+    labels = []
+    for mask, name in ((0x01, "TX timeout"), (0x20, "no ACK"),
+                       (0x40, "BUS-OFF"), (0x80, "bus error")):
+        if eid & mask:
+            labels.append(name)
+    if eid & 0x04 and len(data) > 1:
+        for mask, name in ((0x04, "RX warning"), (0x08, "TX warning"),
+                           (0x10, "RX passive"), (0x20, "TX passive"),
+                           (0x40, "ERROR-ACTIVE")):
+            if data[1] & mask:
+                labels.append(name)
+    if eid & 0x08 and len(data) > 3:
+        for mask, name in ((0x01, "bit error"), (0x02, "form error"),
+                           (0x04, "stuff error"), (0x08, "cannot send dominant bit"),
+                           (0x10, "cannot send recessive bit")):
+            if data[2] & mask:
+                labels.append(name)
+        labels.append(f"protocol location=0x{data[3]:02X}")
+    return f"EID=0x{eid:08X}, {', '.join(labels) or 'unspecified'}, data={data.hex(' ')}"
+
+
+def probe(bus, driver_ids, timeout, *, brs=True, once=False, on_error=None):
     # Discard previously buffered frames before sending the fresh read requests.
     drain_until = time.monotonic() + 0.1
     while time.monotonic() < drain_until:
         if bus.recv(timeout=0.0) is None:
             break
-    results = {driver_id: {"reply": False, "status_count": 0, "last_status": b""}
+    results = {driver_id: {"reply": False, "status_count": 0, "last_status": b"",
+                           "requests_sent": 0}
                for driver_id in driver_ids}
     deadline = time.monotonic() + timeout
     next_request = 0.0
@@ -72,14 +97,19 @@ def probe(bus, driver_ids, timeout):
         now = time.monotonic()
         if now >= next_request:
             for driver_id, result in results.items():
-                if not result["reply"]:
-                    bus.send(read_request(driver_id), timeout=0.1)
+                if not result["reply"] and (not once or result["requests_sent"] == 0):
+                    bus.send(read_request(driver_id, brs=brs), timeout=0.1)
+                    result["requests_sent"] += 1
             next_request = now + 0.5
         msg = bus.recv(timeout=min(0.05, max(0.0, deadline - time.monotonic())))
         if msg is None:
             continue
         if msg.is_error_frame:
             error_frames += 1
+            if on_error is not None:
+                on_error(msg)
+            if msg.arbitration_id & 0x40:  # CAN_ERR_BUSOFF
+                break
         decoded = classify(msg, results)
         if decoded is not None:
             kind, driver_id, data = decoded
@@ -99,15 +129,32 @@ def main(argv=None):
     parser.add_argument("--channel", required=True, help="COM port or Linux can0")
     parser.add_argument("--ids", type=lambda v: int(v, 0), nargs="+", default=[0, 1])
     parser.add_argument("--seconds", type=float, default=5.0)
+    parser.add_argument("--once", action="store_true",
+                        help="Submit one read per ID, without application retries (kernel retries may still occur)")
+    parser.add_argument("--no-brs", action="store_true",
+                        help="Diagnostic: send CAN FD reads at nominal bitrate; firmware replies remain FD+BRS")
     args = parser.parse_args(argv)
     if (not math.isfinite(args.seconds) or not 0 < args.seconds <= 60
             or any(not 0 <= driver_id <= 255 for driver_id in args.ids)
             or len(set(args.ids)) != len(args.ids)):
         parser.error("Use unique IDs 0..255 and a duration >0 and <=60 seconds")
-    print("ISO CAN FD + BRS: 1M/5M. Sending only driver-ID read requests.")
+    tx_mode = "FD, BRS off (1M)" if args.no_brs else "FD+BRS (1M/5M)"
+    print(f"TX={tx_mode}. Sending only driver-ID read requests; replies/status use FD+BRS.")
+    error_samples = {}
+
+    def remember_error(message):
+        # Group counter-byte changes rather than flooding a busy terminal.
+        key = (message.arbitration_id, bytes(message.data[:6]))
+        if key in error_samples:
+            error_samples[key][1] += 1
+        elif len(error_samples) < 16:
+            error_samples[key] = [describe_error(message), 1]
+
     try:
         with can.Bus(**connection_options(args.interface, args.channel)) as bus:
-            results, errors = probe(bus, args.ids, args.seconds)
+            results, errors = probe(bus, args.ids, args.seconds,
+                                    brs=not args.no_brs, once=args.once,
+                                    on_error=remember_error)
     except (can.CanError, OSError, ValueError, RuntimeError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1
@@ -117,11 +164,14 @@ def main(argv=None):
         passed = passed and ok
         payload = result["last_status"]
         print(f"ID {driver_id}: {'PASS' if ok else 'FAIL'}; "
+              f"TX submissions={result['requests_sent']} (not ACK confirmation), "
               f"FD+BRS read reply={result['reply']}, "
               f"8-byte status frames={result['status_count']}, data={payload.hex(' ')}")
         if payload and payload[7]:
             print(f"  Motor reports error 0x{payload[7]:02X}; a transport PASS is not motor-health OK.")
     print(f"Error frames seen: {errors} (backend-dependent; not a bus error-counter check)")
+    for description, count in error_samples.values():
+        print(f"  {count}x {description}")
     if not passed:
         print("Check FD adapter/firmware, IDs, 1M/5M, BRS, wiring and status broadcast enable.")
     return 0 if passed else 1

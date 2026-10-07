@@ -1,6 +1,7 @@
 """Platform settings and asynchronous capture/connection cleanup."""
 import socket
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -22,10 +23,11 @@ class ConnectionHandlersMixin:
         self.channel_edit.setText(str(settings.value(key + "/channel", default)))
         self.bitrate_edit.setText(str(settings.value(key + "/bitrate", 1000000)))
         self.bitrate_edit.setEnabled(iface != "socketcan")
+        self.cb_tx_brs.setChecked(settings.value(key + "/tx_brs", iface != "socketcan", type=bool))
         if iface == "socketcan":
-            self.connection_hint.setText("Linux에서 ip link/slcand로 bitrate와 인터페이스를 먼저 설정하세요.")
+            self.connection_hint.setText("CAN FD RX 1M/5M. TX BRS OFF는 1M FD 송신입니다. Linux에서 fd on 설정 후 연결하세요. Connect는 수신만 시작합니다.")
         elif iface == "slcan":
-            self.connection_hint.clear()
+            self.connection_hint.setText("CANable 2.0 호환 FD 펌웨어가 필요합니다. CAN FD+BRS 1M/5M 전용입니다.")
         else:
             self.connection_hint.setText("candleLight/gs_usb 장치 인덱스 (보통 0). gs-usb/pyusb가 필요합니다.")
         self.connection_hint.setVisible(bool(self.connection_hint.text()))
@@ -56,6 +58,7 @@ class ConnectionHandlersMixin:
         key = f"connection/{sys.platform}/{iface}"
         settings.setValue(key + "/channel", self.channel_edit.text().strip())
         settings.setValue(key + "/bitrate", self.bitrate_edit.text().strip())
+        settings.setValue(key + "/tx_brs", self.cb_tx_brs.isChecked())
 
     def _set_connection_controls(self, connected):
         self.btn_connect.setEnabled(not connected)
@@ -64,7 +67,30 @@ class ConnectionHandlersMixin:
         self.channel_combo.setEnabled(not connected)
         self.btn_refresh_channels.setEnabled(not connected)
         self.bitrate_edit.setEnabled(not connected and self.iface_combo.currentText() != "socketcan")
+        self.cb_tx_brs.setEnabled(not connected)
         self.btn_record.setEnabled(connected and self.capture is None)
+        self.btn_resume_tx.setEnabled(
+            connected and self.manager.interface == "socketcan"
+            and self.manager.writer is not None
+            and self.manager.writer.pause_event.is_set()
+            and self._tx_resume_thread is None)
+
+    def _on_resume_tx(self):
+        if self.manager.bus is None or self._tx_resume_thread is not None:
+            return
+        self._tx_resume_writer = self.manager.writer
+        writer = self._tx_resume_writer
+        self._tx_resume_result = None
+        self.btn_resume_tx.setEnabled(False)
+
+        def check_state():
+            try:
+                self._tx_resume_result = self.manager.resume_tx(expected_writer=writer)
+            except Exception as exc:
+                self._tx_resume_result = f"TX remains paused: {exc}"
+
+        self._tx_resume_thread = threading.Thread(target=check_state, name="can-state-check", daemon=True)
+        self._tx_resume_thread.start()
 
     def _on_record_toggle(self):
         if self.capture is not None:
@@ -102,6 +128,13 @@ class ConnectionHandlersMixin:
 
     def _poll_background(self):
         self._poll_capture()
+        if self._tx_resume_thread is not None and not self._tx_resume_thread.is_alive():
+            self._tx_resume_thread = None
+            if self.manager.writer is self._tx_resume_writer and self.manager.bus is not None:
+                self._log(self._tx_resume_result)
+                self._update_rate_label(force=True)
+            self._tx_resume_writer = None
+            self._tx_resume_result = None
         worker = self._disconnect_thread
         if worker is not None and not worker.is_alive():
             self._disconnect_thread = None
