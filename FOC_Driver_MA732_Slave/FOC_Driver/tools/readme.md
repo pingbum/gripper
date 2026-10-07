@@ -26,13 +26,10 @@ STM32G474(FDCAN)로 구동되는 **FD can slave 모터 드라이버**와 PC를 �
 * **Rx(모터→PC, 확장 ID, 8B)**:
   `pos_deg = int16_BE / 10`, `spd_erpm = int16_BE × 10`, `cur_A = int16_BE / 1000`, `temp_C = int8`, `error = uint8`
 
-> **중요(사실 고지)**
-> 제공하신 브로드캐스트 예제는 `FDFormat = FDCAN_FD_CAN`(CAN FD)입니다.
-> **많은 CANable 계열(특히 candleLight/gs\_usb, slcan)은 *클래식 CAN*만 지원**합니다.
->
-> * 만약 사용 중인 **MKS CANable V2.0 Pro가 CAN FD를 지원하지 않으면**, PC에서는 **브로드캐스트 프레임을 수신하지 못합니다**.
-> * 이 경우, **펌웨어에서 브로드캐스트 전송을 클래식 CAN(`FDFormat = FDCAN_CLASSIC_CAN`)으로 변경**하거나, **CAN FD 지원 어댑터**(예: Kvaser/PEAK 등의 FD 모델)를 사용해야 합니다.
-> * 어떤 모델이 FD를 지원하는지는 제품 사양에 좌우됩니다. 제가 여기서 단정할 수 없습니다. 장치 스펙으로 확인 바랍니다.
+> 펌웨어의 상태/응답은 **ISO CAN FD+BRS, 1M/5M**입니다. 앱의 `socketcan` 송신은 기본 **FD, BRS OFF(1M)**이며 `TX BRS (5M)`으로 바꿀 수 있습니다.
+> FD 지원 SocketCAN 또는 CANable 2.0 호환 FD SLCAN 펌웨어가 필요합니다.
+> Classic-only `gs_usb`/SLCAN 어댑터는 지원하지 않습니다.
+> Connect는 수신만 시작하며, 스캔·파라미터 읽기는 버튼을 눌렀을 때 전송합니다.
 
 ---
 
@@ -111,13 +108,13 @@ tools/
 
    * **Interface**:
 
-     * COM11처럼 보이면 `slcan`
-     * candleLight(WinUSB)라면 `gs_usb`
+     * CANable 2.0 호환 FD 펌웨어가 있는 COM 포트는 `slcan`
+     * Linux의 FD 지원 CAN 인터페이스는 `socketcan`
    * **Channel**:
 
      * `slcan` → `COM11` 같은 실제 포트명
-     * `gs_usb` → 장치 인덱스(보통 `0`)
-   * **Bitrate**: **보드 설정과 동일값** (예: `500000`)
+     * `socketcan` → `can0` (먼저 `ip link`로 FD 1M/5M 설정)
+   * **Bitrate**: `slcan`은 `1000000`, 데이터 속도는 5M. SocketCAN은 OS에서 설정
    * **Connect** 클릭
    * 상태 프레임이 보이면 그래프가 움직입니다.
 4. **Write** 사용:
@@ -127,7 +124,7 @@ tools/
    * Value: A 또는 eRPM 입력
    * **Write** 버튼 → 확장 ID로 s32 BE 8바이트 전송
 
-> **CAN FD 주의**: 브로드캐스트가 FD로 나가면 CANable이 클래식만 지원하는 경우 **수신 그래프는 갱신되지 않습니다**. 명령 송신(클래식 8B)은 보통 정상 동작합니다.
+> 짧은 명령도 **FD**로 송신합니다. `TX BRS (5M)`을 끄면 송신 데이터 구간은 1M이며, FD+BRS 수신은 계속 가능합니다. 설정 변경은 Disconnect 후 적용하세요.
 
 ---
 
@@ -178,7 +175,7 @@ REF_SEND_HZ        = 1000
 * `[7]` uint8: `error_code`
 
 > 이 브로드캐스트는 펌웨어에서 `FDFormat = FDCAN_FD_CAN`로 설정돼 있습니다.
-> **클래식 CAN만 되는 어댑터**에선 수신되지 않을 수 있습니다. 그런 경우 펌웨어에서 `FDCAN_CLASSIC_CAN`으로 변경하세요.
+> **클래식 CAN만 되는 어댑터**는 지원하지 않습니다. FD 지원 장치를 사용하세요.
 
 ---
 
@@ -188,7 +185,7 @@ REF_SEND_HZ        = 1000
 
 * Interface: `slcan`
 * Channel: `COM11`
-* Bitrate: `500000`
+* Bitrate: `1000000` (데이터 5M, CANable 2.0 호환 FD 펌웨어 필요)
 * Connect
 
 ### 7.2 명령 전송
@@ -219,7 +216,7 @@ REF_SEND_HZ        = 1000
 
 ### 7.6 Motor Scan / Read
 
-* **Connect 직후 자동 스캔**: 0x87 read 요청을 0~255에 전송
+* **Connect 직후 수신만 시작**: 브로드캐스트 상태에서 모터 ID를 자동으로 목록에 추가
 * **Scan Motors** 버튼으로 재스캔(드롭다운 목록 초기화 후 갱신)
 * Motor 드롭다운 선택 시 **Driver ID / Listen ID / Raw CAN ID**가 함께 변경됨
 * **Read Request**는 Func ID에 **MSB 플래그(0x80)** 자동 적용
@@ -232,8 +229,8 @@ REF_SEND_HZ        = 1000
 * Vel Kp → `0x20` (float32)
 * Vel Ki → `0x21` (float32)
 * **Flash Update** → `0x10`
-* Connect 후 약 0.3초 뒤 **자동 Read**로 위 파라미터를 채움(각 2회 재시도)
-  * Driver ID 기준으로 읽습니다. 다른 모터 값을 보고 싶으면 Driver ID 변경 후 재연결하거나 Raw Read를 사용하세요.
+* **Read Params**를 누르면 위 파라미터를 읽음(각 2회 재시도)
+  * Driver ID 기준으로 읽습니다. 다른 모터 값은 Driver ID 변경 후 Read Params를 누르세요.
 
 ---
 
@@ -241,8 +238,8 @@ REF_SEND_HZ        = 1000
 
 **연결 자체가 안 됨**
 
-* `slcan`인데 포트가 안 보임 → 장치가 candleLight(WinUSB)일 수 있습니다. `gs_usb`로 시도.
-* `gs_usb`인데 못 붙음 → WinUSB 드라이버(Zadig) 설치/재설치 필요할 수 있음.
+* `slcan`인데 포트가 안 보임 → CANable 2.0 호환 FD SLCAN 펌웨어와 실제 COM 포트를 확인.
+* Linux `socketcan` → FD 지원 장치인지, `can0`에 `fd on` 및 1M/5M이 설정됐는지 확인.
 * “Access denied” / “busy” → 다른 시리얼/캔 툴이 장치를 점유 중인지 확인(시리얼 모니터, 다른 GUI 등).
 
 **프레임이 안 들어옴**
@@ -252,7 +249,7 @@ REF_SEND_HZ        = 1000
 * **확장 ID 필터**: GUI의 “Listen Driver ID”가 보드의 `MY_DRIVER_ID`(예: 1)와 일치해야 합니다.
 * **CAN FD 이슈**: 브로드캐스트가 FD라면, **클래식 전용 어댑터에선 수신 불가**입니다.
 
-  * 해결: (A) 보드에서 `FDCAN_CLASSIC_CAN`으로 전송, (B) FD 지원 어댑터 사용.
+  * 해결: FD 지원 어댑터와 호환 FD 펌웨어 사용.
   * 제 쪽에서 MKS CANable V2.0 Pro의 FD 지원 여부는 보장할 수 없습니다. **모델 스펙으로 확인**해 주세요.
 
 **파이썬 에러**
@@ -265,9 +262,10 @@ REF_SEND_HZ        = 1000
 
 ```python
 import can
-# slcan 예시
-bus = can.Bus(interface='slcan', channel='COM11', bitrate=500000)
-print(bus.recv(1.0))  # 1초 대기, 수신 프레임 1개 출력(없으면 None)
+from can_io import connection_options
+# tools 폴더에서 실행. CANable 2.0 호환 FD SLCAN 예시.
+with can.Bus(**connection_options('slcan', 'COM11', 1000000)) as bus:
+    print(bus.recv(1.0))
 ```
 
 **Read가 timeout**

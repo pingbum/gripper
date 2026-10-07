@@ -41,16 +41,19 @@ class ReferenceCommand:
 
 
 class CANWriterThread(threading.Thread):
-    """Single TX owner. GUI enqueues commands; periodic packets never accumulate.
+    """Single TX owner; every command is extended ISO CAN FD, with optional BRS.
 
     A periodic factory takes elapsed seconds and returns (EID, payload, plot_value).
     A future packed control command can use the same interface.
     """
-    def __init__(self, bus):
+    def __init__(self, bus, bitrate_switch=True):
         super().__init__(name="can-tx", daemon=True)
         self.bus = bus
+        self.bitrate_switch = bool(bitrate_switch)
         self.commands = queue.Queue(maxsize=TX_QUEUE_SIZE)
         self.stop_event = threading.Event()
+        self.pause_event = threading.Event()
+        self.tx_generation = 0
         self.wake = threading.Event()
         self.lock = threading.Lock()
         self.factory = None
@@ -63,16 +66,25 @@ class CANWriterThread(threading.Thread):
         self.latest_reference = None
 
     def enqueue(self, eid, payload, timeout=TX_TIMEOUT_S):
-        message = can.Message(arbitration_id=eid, is_extended_id=True,
-                              data=bytes(payload), check=True)
+        message = self._message(eid, payload)
         with self.lock:
             if self.stop_event.is_set():
                 raise RuntimeError("CAN transmitter is stopped")
+            if self.pause_event.is_set():
+                raise RuntimeError("CAN TX paused; use Check CAN / Resume TX after recovery")
             try:
-                self.commands.put_nowait((message, timeout))
+                self.commands.put_nowait((message, timeout, self.tx_generation))
             except queue.Full:
                 raise RuntimeError("TX queue full; command was not queued") from None
         self.wake.set()
+
+    def _message(self, eid, payload):
+        # Bus(fd=True) enables the socket; each outgoing message needs these
+        # flags too, including 1/4/8-byte commands and scan/read requests.
+        # Disabling BRS keeps FD and sends the data phase at nominal bitrate.
+        return can.Message(arbitration_id=eid, is_extended_id=True,
+                           is_fd=True, bitrate_switch=self.bitrate_switch,
+                           data=bytes(payload), check=True)
 
     def set_periodic(self, factory, rate_hz):
         if not math.isfinite(rate_hz) or not 1 <= rate_hz <= MAX_REF_SEND_HZ:
@@ -80,6 +92,8 @@ class CANWriterThread(threading.Thread):
         with self.lock:
             if self.stop_event.is_set():
                 raise RuntimeError("CAN transmitter is stopped")
+            if self.pause_event.is_set():
+                raise RuntimeError("CAN TX paused; use Check CAN / Resume TX after recovery")
             self.factory = factory
             self.period = 1.0 / rate_hz
             self.origin = time.perf_counter()
@@ -104,7 +118,39 @@ class CANWriterThread(threading.Thread):
             self.stop_event.set()
             self.factory = None
             self.generation += 1
+            self.tx_generation += 1
         self.wake.set()
+
+    def pause(self):
+        """Discard pending work; keep the worker alive for explicit recovery."""
+        with self.lock:
+            newly_paused = not self.pause_event.is_set()
+            self.pause_event.set()
+            self.tx_generation += 1
+            self.factory = None
+            self.generation += 1
+            self.latest_reference = None
+            while True:
+                try:
+                    self.commands.get_nowait()
+                except queue.Empty:
+                    break
+        self.wake.set()
+        return newly_paused
+
+    def resume(self, expected_generation):
+        """Accept new commands only; no queued commands or waveform replay."""
+        with self.lock:
+            if self.stop_event.is_set():
+                raise RuntimeError("CAN transmitter is stopped; reconnect required")
+            if expected_generation != self.tx_generation:
+                raise RuntimeError("New CAN warning during state check; TX remains paused")
+            self.pause_event.clear()
+        self.wake.set()
+
+    def transport_generation(self):
+        with self.lock:
+            return self.tx_generation
 
     def take_reference(self):
         with self.lock:
@@ -122,9 +168,11 @@ class CANWriterThread(threading.Thread):
         with self.lock:
             return self.factory is not None
 
-    def _send(self, message, timeout):
-        if self.stop_event.is_set():
-            return False
+    def _send(self, message, timeout, tx_generation):
+        with self.lock:
+            if (self.stop_event.is_set() or self.pause_event.is_set()
+                    or tx_generation != self.tx_generation):
+                return False
         try:
             self.bus.send(message, timeout=timeout)
         except Exception as exc:
@@ -144,24 +192,25 @@ class CANWriterThread(threading.Thread):
         while not self.stop_event.is_set():
             self.wake.clear()
             try:
-                message, timeout = self.commands.get_nowait()
+                message, timeout, tx_generation = self.commands.get_nowait()
             except queue.Empty:
                 pass
             else:
-                if not self._send(message, timeout):
-                    break
+                if not self._send(message, timeout, tx_generation):
+                    if self.stop_event.is_set():
+                        break
+                    continue
 
             with self.lock:
-                factory, period, origin, current = (
-                    self.factory, self.period, self.origin, self.generation)
+                factory, period, origin, current, tx_generation = (
+                    self.factory, self.period, self.origin, self.generation, self.tx_generation)
             if current != generation:
                 generation, deadline = current, time.perf_counter()
             now = time.perf_counter()
             if factory is not None and now >= deadline:
                 try:
                     eid, payload, value = factory(now - origin)
-                    message = can.Message(arbitration_id=eid, is_extended_id=True,
-                                          data=payload, check=True)
+                    message = self._message(eid, payload)
                 except Exception as exc:
                     with self.lock:
                         self.errors.append(str(exc))
@@ -169,7 +218,7 @@ class CANWriterThread(threading.Thread):
                     continue
                 with self.lock:
                     valid = generation == self.generation and self.factory is not None
-                if valid and self._send(message, TX_TIMEOUT_S):
+                if valid and self._send(message, TX_TIMEOUT_S, tx_generation):
                     with self.lock:
                         if generation == self.generation:
                             self.latest_reference = (time.monotonic(), value)

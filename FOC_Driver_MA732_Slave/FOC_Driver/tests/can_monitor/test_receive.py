@@ -42,6 +42,60 @@ def receive(messages, **kwargs):
 
 
 class ReceiveTests(unittest.TestCase):
+    def test_fd_broadcasts_discover_motors_without_scan_requests(self):
+        scan_hits = set()
+        frames = [status(0, 15), status(1, 30)]
+        for frame in frames:
+            frame.is_fd = frame.bitrate_switch = True
+        reader = receive(frames, scan_hits=scan_hits, scan_lock=threading.Lock())
+        self.assertEqual(scan_hits, {0, 1})
+        self.assertIsNotNone(reader.take_latest_status(0))
+        self.assertIsNotNone(reader.take_latest_status(1))
+
+    def test_bus_off_stops_transmission_and_reception(self):
+        tx_stop = threading.Event()
+        frame = can.Message(arbitration_id=0x40, is_error_frame=True, data=bytes(8))
+        reader = receive([frame, status(0, 15)], on_error=tx_stop.set)
+        self.assertTrue(tx_stop.is_set())
+        self.assertIn("BUS-OFF", reader.last_error)
+        self.assertIsNone(reader.take_latest_status(0))
+
+    def test_only_tx_error_passive_pauses_transmission_and_rx_continues(self):
+        for flags, side in ((0x10, "RX"), (0x20, "TX"), (0x30, "RX/TX")):
+            with self.subTest(side=side):
+                tx_stop = threading.Event()
+                frame = can.Message(arbitration_id=0x04, is_error_frame=True,
+                                    data=bytes([0, flags]) + bytes(6))
+                fatal_stop = threading.Event()
+                reader = receive([frame, status(0, 15), status(1, 30)],
+                                 on_error=fatal_stop.set, on_warning=tx_stop.set)
+                self.assertEqual(tx_stop.is_set(), bool(flags & 0x20))
+                self.assertFalse(fatal_stop.is_set())
+                self.assertIsNone(reader.last_error)
+                self.assertIn(f"ERROR-PASSIVE ({side},", reader.last_warning)
+                self.assertIn("TX paused" if flags & 0x20 else "TX remains available",
+                              reader.last_warning)
+                self.assertIsNotNone(reader.take_latest_status(0))
+                self.assertIsNotNone(reader.take_latest_status(1))
+                self.assertEqual(reader.get_and_reset_rx_count(), 2)
+
+    def test_counter_changes_do_not_repeat_same_warning_and_recovery_is_reported(self):
+        passive = [can.Message(arbitration_id=0x04, is_error_frame=True,
+                               data=b"\x00\x10" + bytes(5) + bytes([counter]))
+                   for counter in (0x79, 0x7a, 0x79)]
+        reader = receive(passive)
+        self.assertEqual(reader.warning_count, 3)
+        notices = reader.take_notices()
+        self.assertEqual(len(notices), 1)
+        self.assertIn("ERROR-PASSIVE", notices[0][1])
+        self.assertEqual(reader.take_notices(), [])
+        active = can.Message(arbitration_id=0x04, is_error_frame=True,
+                             data=b"\x00\x40" + bytes(6))
+        reader = receive(passive + [active, status(0, 15)])
+        self.assertIsNone(reader.last_warning)
+        self.assertEqual([kind for kind, _ in reader.take_notices()], ["warning", "state"])
+        self.assertIsNotNone(reader.take_latest_status(0))
+
     def test_both_arrival_orders_keep_each_drivers_latest_status(self):
         for order in ((0, 1), (1, 0)):
             with self.subTest(order=order):

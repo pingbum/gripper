@@ -49,7 +49,17 @@ class UtilsMixin:
         rx_hz = rx_count / dt
         tx_count, skipped, errors = self.manager.writer.take_stats() if self.manager.writer else (0, 0, [])
         tx_hz = tx_count / dt
-        self.lbl_tx_health.setText(f"TX skipped: {skipped} (last {dt:.1f}s)")
+        paused = self.manager.writer is not None and self.manager.writer.pause_event.is_set()
+        count = self.reader_thread.warning_count if self.reader_thread else 0
+        if paused:
+            self.lbl_tx_health.setText(f"TX paused / RX continues / warnings: {count}")
+        elif self.manager.writer is not None:
+            self.lbl_tx_health.setText(f"TX ready / CAN warnings: {count} / skipped: {skipped}")
+        else:
+            self.lbl_tx_health.setText(f"TX skipped: {skipped} (last {dt:.1f}s)")
+        self.btn_resume_tx.setEnabled(
+            paused and self.manager.interface == "socketcan"
+            and self._disconnect_thread is None and self._tx_resume_thread is None)
         if errors:
             self._log(f"TX stopped: {errors[-1]} ({len(errors)} errors)")
             if self.manager.writer.stop_event.is_set():
@@ -175,8 +185,9 @@ class UtilsMixin:
         self.read_deadline = time.monotonic() + 0.5
         try:
             self.manager.send_ext(build_ext_id(req_func_id, motor_id), b"\x00" * 8)
-        except Exception:
+        except Exception as exc:
             self.read_pending = False
+            self._log(f"Read Params 요청 실패: {exc}")
 
     def _apply_param_read(self, func_id: int, data: bytes):
         if len(data) < 4:

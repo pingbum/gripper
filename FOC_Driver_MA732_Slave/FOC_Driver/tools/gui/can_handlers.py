@@ -32,7 +32,7 @@ class CANHandlersMixin:
                     self.manager.send_ext(eid, b"\x00" * 8)
                 except Exception:
                     break
-                self.scan_stop.wait(0.003)
+                self.scan_stop.wait(0.02)
             self._scan_in_progress = False
 
         self.scan_thread = threading.Thread(target=worker, daemon=True)
@@ -52,7 +52,7 @@ class CANHandlersMixin:
             return
 
         try:
-            self.manager.connect(iface, channel, bitrate)
+            self.manager.connect(iface, channel, bitrate, tx_brs=self.cb_tx_brs.isChecked())
             self._save_connection_settings()
             self._reset_monitor()
             self._last_rate_ts = time.monotonic()
@@ -70,17 +70,20 @@ class CANHandlersMixin:
                 0x87,
                 self.read_watch,
                 self.read_lock,
+                on_error=self.manager.writer.stop,
+                on_warning=self.manager.writer.pause,
             )
             self.reader_thread.start()
 
             self._set_connection_controls(True)
             setting = "bitrate=OS-managed" if iface == "socketcan" else f"bitrate={bitrate}"
-            self._log(f"Connected: iface={iface}, channel={channel}, {setting}")
+            tx_mode = "FD+BRS" if self.manager.writer.bitrate_switch else "FD (BRS off, data=nominal bitrate)"
+            self._log(f"Connected: iface={iface}, channel={channel}, {setting}, TX={tx_mode}")
+            self._log("Connect: 수신만 시작합니다. Scan Motors / Read Params 버튼으로 요청을 전송하세요.")
+            if self.manager.setup_warning and self.manager.writer.bitrate_switch:
+                self._log(f"CAN setup warning: {self.manager.setup_warning}")
             if hasattr(self, "scan_timer"):
-                self._start_scan()
                 self.scan_timer.start(200)
-            if hasattr(self, "_start_param_read"):
-                QtCore.QTimer.singleShot(300, self._start_param_read)
         except Exception as e:
             self._log(f"Connect 실패: {e}")
             if self.manager.bus is not None:
@@ -154,6 +157,15 @@ class CANHandlersMixin:
             self._log(f"RX error: {self.reader_thread.last_error}")
             self._on_disconnect()
             return
+        if self.reader_thread:
+            for kind, notice in self.reader_thread.take_notices():
+                self._log(f"CAN {kind}: {notice}")
+        if self.manager.writer and self.manager.writer.pause_event.is_set():
+            if self.ref_running:
+                self._stop_reference()
+            self.scan_stop.set()
+            self.read_pending = False
+            self.param_read_queue.clear()
         self._collect_reference()
         listen_id = self.spin_listen.value()
         if listen_id != self._last_listen_id:

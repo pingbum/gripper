@@ -138,6 +138,51 @@ class ProbeTests(unittest.TestCase):
                 self.assertEqual(result["reply"], respond)
                 self.assertEqual(result["status_count"], int(respond))
 
+    def test_single_read_can_disable_brs_without_using_classic_or_retrying(self):
+        class SilentBus:
+            def __init__(self):
+                self.sent = []
+
+            def send(self, msg, timeout):
+                self.sent.append(msg)
+
+            def recv(self, timeout):
+                return None
+
+        for once in (False, True):
+            bus = SilentBus()
+            ticks = iter(i * 0.01 for i in range(10000))
+            with patch.object(check.time, "monotonic", side_effect=lambda: next(ticks)):
+                results, errors = check.probe(bus, [0], 1.2, brs=False, once=once)
+            self.assertEqual(len(bus.sent), 1 if once else 3)
+            self.assertEqual(results[0]["requests_sent"], len(bus.sent))
+            self.assertFalse(results[0]["reply"])
+            self.assertEqual(errors, 0)
+            for msg in bus.sent:
+                self.assertEqual(msg.arbitration_id, 0x8700)
+                self.assertTrue(msg.is_fd and msg.is_extended_id)
+                self.assertFalse(msg.bitrate_switch)
+
+    def test_probe_does_not_submit_more_reads_after_bus_off(self):
+        class BusOffBus:
+            def __init__(self):
+                self.sent = []
+                self.messages = deque()
+
+            def send(self, msg, timeout):
+                self.sent.append(msg)
+                self.messages.append(can.Message(arbitration_id=0x40,
+                                                 is_error_frame=True, data=bytes(8)))
+
+            def recv(self, timeout):
+                return self.messages.popleft() if self.messages else None
+
+        bus = BusOffBus()
+        results, errors = check.probe(bus, [0], 1.2)
+        self.assertEqual(len(bus.sent), 1)
+        self.assertEqual(errors, 1)
+        self.assertFalse(results[0]["reply"])
+
 
 if __name__ == "__main__":
     unittest.main()
