@@ -10,6 +10,7 @@
 
 #include "main_cpp.hpp"
 #include "MA732.hpp"
+#include "MA732_debug.hpp"
 #include "DRV8316C_SPI.hpp"
 #include "SPI_handler.hpp"
 #include "can.hpp"
@@ -240,6 +241,10 @@ float32_t cogging_table_value(uint16_t bin) { return cogging.table_value(bin); }
  */
 extern "C" void main_cpp(void) {
 
+  // Temporary MA732 register inspection, after MX_SPI3_Init in main.c.
+  // Comment out this one call when finished to restore normal motor startup.
+  MA732_DebugRegistersAndHalt(encoder);
+
   // Set Drv8316
   drv8316.clearFAULT();
   HAL_Delay(100);
@@ -362,6 +367,10 @@ void HAL_ADC_ConversionENDCallback(ADC_HandleTypeDef *hadc) {
 // 10 kHz encoder update loop (same update rate used by the previous encoder).
 void TIM6_PeriodElapsedCB(TIM_HandleTypeDef *htim) {
   UNUSED(htim);
+  // Register data is returned in the next frame. Never let this ISR consume
+  // that response as an angle, or interrupt the 20ms sensor-NVM write window.
+  if (encoder.registerAccessInProgress())
+    return;
   static uint32_t time_prev = 0; // TIM2 counter reference.
   uint32_t time_current = htim2.Instance->CNT;
   uint32_t time_delta = time_current - time_prev;
