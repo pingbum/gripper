@@ -158,7 +158,7 @@ class UIBuilderMixin:
         self.connection_hint.setMaximumWidth(260)
         self.bitrate_edit = QtWidgets.QLineEdit(str(DEFAULT_BITRATE))
         self.cb_tx_brs = QtWidgets.QCheckBox("TX BRS (5M)")
-        self.cb_tx_brs.setToolTip("Off: CAN FD commands use the nominal bitrate (1M). FD+BRS reception remains enabled. Enable after 5M TX timing/TDC is verified.")
+        self.cb_tx_brs.setToolTip("SocketCAN: TX BRS is disabled; CAN FD commands use 1M. FD+BRS reception remains enabled.")
         self.btn_connect = QtWidgets.QPushButton("Connect")
         self.btn_disconnect = QtWidgets.QPushButton("Disconnect")
         self.btn_disconnect.setEnabled(False)

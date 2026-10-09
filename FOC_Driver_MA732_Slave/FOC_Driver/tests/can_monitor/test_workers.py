@@ -457,7 +457,7 @@ class GuiWorkerTests(unittest.TestCase):
             window.close()
             window.deleteLater()
 
-    def test_tx_brs_choice_applies_to_read_and_calibration_while_fd_brs_rx_continues(self):
+    def test_socketcan_forces_brs_off_while_fd_brs_rx_continues(self):
         class BroadcastBus(FakeBus):
             def recv(self, timeout):
                 time.sleep(0.01)
@@ -484,13 +484,14 @@ class GuiWorkerTests(unittest.TestCase):
                     self.assertEqual([msg.arbitration_id for _, msg in bus.sent], [0x9101, 0x0601])
                     for _, msg in bus.sent:
                         self.assertTrue(msg.is_fd and msg.is_extended_id)
-                        self.assertEqual(msg.bitrate_switch, brs)
+                        self.assertFalse(msg.bitrate_switch)
                     window._on_disconnect()
                     self.pump(0.1)
-                    self.assertTrue(window.cb_tx_brs.isEnabled())
+                    self.assertFalse(window.cb_tx_brs.isEnabled())
                     window.iface_combo.setCurrentText("slcan")
                     window.iface_combo.setCurrentText("socketcan")
-                    self.assertEqual(window.cb_tx_brs.isChecked(), brs)
+                    self.assertFalse(window.cb_tx_brs.isChecked())
+                    self.assertFalse(window.cb_tx_brs.isEnabled())
                 finally:
                     window._on_disconnect()
                     self.pump(0.1)

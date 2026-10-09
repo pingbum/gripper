@@ -23,7 +23,8 @@ class ConnectionHandlersMixin:
         self.channel_edit.setText(str(settings.value(key + "/channel", default)))
         self.bitrate_edit.setText(str(settings.value(key + "/bitrate", 1000000)))
         self.bitrate_edit.setEnabled(iface != "socketcan")
-        self.cb_tx_brs.setChecked(settings.value(key + "/tx_brs", iface != "socketcan", type=bool))
+        self.cb_tx_brs.setChecked(False if iface == "socketcan" else settings.value(key + "/tx_brs", True, type=bool))
+        self.cb_tx_brs.setEnabled(iface != "socketcan" and self.manager.bus is None)
         if iface == "socketcan":
             self.connection_hint.setText("CAN FD RX 1M/5M. TX BRS OFF는 1M FD 송신입니다. Linux에서 fd on 설정 후 연결하세요. Connect는 수신만 시작합니다.")
         elif iface == "slcan":
@@ -67,7 +68,7 @@ class ConnectionHandlersMixin:
         self.channel_combo.setEnabled(not connected)
         self.btn_refresh_channels.setEnabled(not connected)
         self.bitrate_edit.setEnabled(not connected and self.iface_combo.currentText() != "socketcan")
-        self.cb_tx_brs.setEnabled(not connected)
+        self.cb_tx_brs.setEnabled(not connected and self.iface_combo.currentText() != "socketcan")
         self.btn_record.setEnabled(connected and self.capture is None)
         self.btn_resume_tx.setEnabled(
             connected and self.manager.interface == "socketcan"

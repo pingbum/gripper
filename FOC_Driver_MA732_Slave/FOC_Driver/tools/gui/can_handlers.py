@@ -52,6 +52,8 @@ class CANHandlersMixin:
             return
 
         try:
+            if iface == "socketcan":
+                self.cb_tx_brs.setChecked(False)
             self.manager.connect(iface, channel, bitrate, tx_brs=self.cb_tx_brs.isChecked())
             self._save_connection_settings()
             self._reset_monitor()
