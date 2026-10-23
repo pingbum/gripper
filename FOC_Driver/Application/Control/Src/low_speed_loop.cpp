@@ -14,9 +14,9 @@ static float32_t Kp_vel = 0.003f;
 static float32_t Ki_vel = 0.000005f;
 
 
-// Position loog gains.
-static float32_t Kp_pos = 0.05f; //0.2 for MCP, 0.1 for PIP, 0.05 for DIP
-static float32_t Kd_pos = 0.003f;
+// Position loop gains: output-side degrees -> q-axis current [A].
+static float32_t Kp_pos = 0.005000f;
+static float32_t Kd_pos = 0.000100f;
 static float32_t f_sat = 100;    //D gain saturation frequency
 static float32_t alpha = (2*5000-f_sat*(2*PI)) / (2*5000+f_sat*(2*PI));
 static float32_t beta = (f_sat*(2*PI)*2*5000)/(f_sat*(2*PI)+2*5000);

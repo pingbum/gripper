@@ -4,7 +4,8 @@ Both firmware projects use ISO CAN FD with BRS. Motor control/status payloads
 remain 8 bytes with the same IDs, byte order, scales and field meanings.
 Existing management responses remain 1 or 4 bytes. Flash-stored driver IDs are
 unchanged (firmware defaults: Main 0, Slave 1). SPI and motor-control code are not
-changed. `tools/app.py` and its GUI/backend are **not migrated** in this step.
+changed. On Linux, `tools/app.py` opens SocketCAN with CAN FD enabled and sends
+all GUI commands and periodic references as ISO CAN FD frames with BRS.
 
 ## Firmware
 

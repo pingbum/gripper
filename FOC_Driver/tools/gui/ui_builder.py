@@ -256,7 +256,7 @@ class UIBuilderMixin:
         self.cb_pos = QtWidgets.QCheckBox("Position (deg)"); self.cb_pos.setChecked(True)
         self.cb_spd = QtWidgets.QCheckBox("Speed (eRPM)");  self.cb_spd.setChecked(True)
         self.cb_cur = QtWidgets.QCheckBox("Current (A)");   self.cb_cur.setChecked(True)
-        self.cb_tmp = QtWidgets.QCheckBox("Temp (°C)");     self.cb_tmp.setChecked(True)
+        self.cb_tmp = QtWidgets.QCheckBox("Rev(Temp) (°C)");     self.cb_tmp.setChecked(True)
         self.lbl_error = QtWidgets.QLabel("Error: waiting for selected ID")
         self.lbl_rate = QtWidgets.QLabel("Rate: RX 0.0 Hz / TX 0.0 Hz")
         self.lbl_rate.setToolTip("RX: all valid received IDs. TX: successful backend sends (not motor acknowledgements).")

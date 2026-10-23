@@ -51,6 +51,7 @@ class WorkerTests(unittest.TestCase):
         with patch("can_io.sys.platform", "linux"):
             options = connection_options("socketcan", "can0", 1000000)
             self.assertNotIn("bitrate", options)
+            self.assertTrue(options["fd"])
             self.assertFalse(options["receive_own_messages"])
         with patch("can_io.sys.platform", "win32"):
             with self.assertRaises(ValueError):
@@ -81,6 +82,8 @@ class WorkerTests(unittest.TestCase):
             worker.enqueue(0x8701, bytes(8))
             self.assertTrue(wait_until(lambda: any(msg.arbitration_id == 0x8701
                                                   for _, msg in bus.sent), timeout=0.2))
+            self.assertTrue(all(msg.is_fd and msg.bitrate_switch
+                                for _, msg in bus.sent))
         finally:
             worker.stop()
             worker.join(1)

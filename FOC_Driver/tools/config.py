@@ -4,6 +4,7 @@ import sys
 # 드라이버/프로토콜 상수
 MODE_CURRENT = 1       # 전류 루프 모드
 MODE_VELOCITY = 3      # 속도 루프 모드
+MODE_OPEN_LOOP = 4     # Open-loop rotating voltage vector
 MODE_POSITION = 5      # 위치 루프 모드
 MODE_CALIBRATION = 6   # 튜닝/캘리브레이션 트리거(Write 전용)
 MODE_COGGING_COMPENSATION = 0x30

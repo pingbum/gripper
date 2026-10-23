@@ -64,6 +64,7 @@ class CANWriterThread(threading.Thread):
 
     def enqueue(self, eid, payload, timeout=TX_TIMEOUT_S):
         message = can.Message(arbitration_id=eid, is_extended_id=True,
+                              is_fd=True, bitrate_switch=True,
                               data=bytes(payload), check=True)
         with self.lock:
             if self.stop_event.is_set():
@@ -161,6 +162,7 @@ class CANWriterThread(threading.Thread):
                 try:
                     eid, payload, value = factory(now - origin)
                     message = can.Message(arbitration_id=eid, is_extended_id=True,
+                                          is_fd=True, bitrate_switch=True,
                                           data=payload, check=True)
                 except Exception as exc:
                     with self.lock:

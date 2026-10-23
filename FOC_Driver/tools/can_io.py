@@ -16,8 +16,10 @@ def connection_options(interface, channel, bitrate):
     if interface == "socketcan":
         if not sys.platform.startswith("linux"):
             raise ValueError("SocketCAN requires Linux; use slcan for a Windows COM port")
-        # Bit timing is owned by Linux (ip link / slcand), not Bus().
-        options["receive_own_messages"] = False
+        # Bit timing is owned by Linux (ip link), while fd=True enables
+        # CAN_RAW_FD_FRAMES on the SocketCAN socket. Frames are emitted as
+        # ISO CAN FD with BRS by CANWriterThread.
+        options.update(fd=True, receive_own_messages=False)
     elif interface == "slcan":
         options.update(bitrate=bitrate)
     elif interface == "gs_usb":

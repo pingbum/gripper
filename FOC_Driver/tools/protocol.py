@@ -12,6 +12,7 @@ STM32 G474 측 코드에 맞춘 프로토콜 구현:
   [6]    int8      => temp_C
   [7]    uint8     => error
 """
+import math
 import struct
 from typing import Dict, Tuple
 from config import (
@@ -51,6 +52,15 @@ def pack_command_payload(mode_id: int, value_float: float) -> bytes:
         raise ValueError(f"Unknown mode_id: {mode_id}")
 
     return pack_s32_be(raw) + b"\x00\x00\x00\x00"
+
+def pack_open_loop_payload(electrical_rpm: float, voltage_V: float) -> bytes:
+    """Pack signed electrical RPM and a non-negative voltage in millivolts."""
+    if not (math.isfinite(electrical_rpm) and math.isfinite(voltage_V)):
+        raise ValueError("Open-loop command values must be finite")
+    if voltage_V < 0.0:
+        raise ValueError("Open-loop voltage must be non-negative")
+    return (pack_s32_be(round(electrical_rpm)) +
+            pack_s32_be(round(voltage_V * 1000.0)))
 
 def parse_broadcast_frame(data: bytes) -> Dict[str, float]:
     """
