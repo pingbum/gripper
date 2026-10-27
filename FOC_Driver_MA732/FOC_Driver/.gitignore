@@ -6,7 +6,10 @@ compile_commands.json
 cmake/stm32cubemx/cmake_install.cmake
 cmake/stm32cubemx/CMakeFiles
 build
-.vscode
+# Keep the portable STM32 debugger configuration; other VS Code files are local.
+!.vscode/
+.vscode/*
+!.vscode/launch.json
 .project
 Makefile
 FOC_Driver.lauch

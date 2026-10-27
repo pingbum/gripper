@@ -64,7 +64,9 @@ ip -details -statistics link show can0
 Connect starts **RX only**, without automatic scan or parameter requests.
 Broadcast status frames discover motors in the dropdown without sending traffic.
 Use **Scan Motors** for explicit driver-ID reads (IDs 0..255, 50 Hz) and
-**Read Params** to fetch the selected Driver ID's BW/Kp/Ki. Changing the selected
+**Read Params** to fetch the selected Driver ID's current BW, velocity Kp/Ki and
+position Kp/Kd. **Send Params** writes these five RAM parameters and reads them
+back; saving to Flash remains an explicit action while stopped. Changing the selected
 motor does not transmit. TX remaining at 0 Hz until a request is normal.
 
 If connecting used to stop candump, inspect `ip -details -statistics link show

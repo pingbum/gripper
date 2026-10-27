@@ -77,6 +77,7 @@ class MainWindow(
             "tag": None,
         }
         self.param_read_queue = []
+        self.param_read_driver_id = None
         self.read_retry_left = 0
         self.read_param_current = None
         self.read_lock = threading.Lock()

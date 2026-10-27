@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
+import math
 import struct
 import time
+from protocol import pack_position_gain
 
 from .deps import format_error_code, build_ext_id
 
@@ -163,13 +165,14 @@ class UtilsMixin:
             return
         if self.read_pending:
             return
-        self.param_read_queue = [(0x11, 2), (0x20, 2), (0x21, 2)]
+        self.param_read_driver_id = self.spin_driver.value()
+        self.param_read_queue = [(0x11, 2), (0x20, 2), (0x21, 2), (0x22, 2), (0x23, 2)]
         self._request_next_param_read()
 
     def _request_next_param_read(self):
         if not self.param_read_queue or self.read_pending:
             return
-        motor_id = self.spin_driver.value()
+        motor_id = self.param_read_driver_id
         base_func_id, retries = self.param_read_queue.pop(0)
         req_func_id = base_func_id | 0x80
         resp_eid = build_ext_id(req_func_id, motor_id)
@@ -191,14 +194,24 @@ class UtilsMixin:
 
     def _apply_param_read(self, func_id: int, data: bytes):
         if len(data) < 4:
-            return
+            return False
         value = struct.unpack(">f", data[:4])[0]
+        if func_id in (0x22, 0x23) and (len(data) != 4 or not math.isfinite(value) or value < 0):
+            return False
         if func_id == 0x11:
             self.spin_ctrl_bw.setValue(value)
         elif func_id == 0x20:
             self.spin_ctrl_kp.setValue(value)
         elif func_id == 0x21:
             self.spin_ctrl_ki.setValue(value)
+        elif func_id == 0x22:
+            self.spin_ctrl_pos_kp.setValue(value)
+        elif func_id == 0x23:
+            self.spin_ctrl_pos_kd.setValue(value)
+        if func_id in (0x22, 0x23):
+            name = "Kp" if func_id == 0x22 else "Kd"
+            self._log(f"Position {name} read back: driver={self.param_read_driver_id}, value={value:.9g}")
+        return True
 
     def _poll_read_response(self):
         if not self.read_pending:
@@ -207,12 +220,23 @@ class UtilsMixin:
             data = self.read_watch.get("data")
             func_id = self.read_watch.get("func_id") or 0
             tag = self.read_watch.get("tag")
+        if tag == "param" and self.param_read_driver_id != self.spin_driver.value():
+            self.read_pending = False
+            self.param_read_queue.clear()
+            with self.read_lock:
+                for key in self.read_watch:
+                    self.read_watch[key] = None
+            self._log("Driver ID 변경 — Read Params를 다시 누르세요.")
+            return
+        if data and tag == "param" and not self._apply_param_read(int(func_id), data):
+            with self.read_lock:
+                if self.read_watch.get("data") == data:
+                    self.read_watch["data"] = None
+            data = None
         if data:
             text = self._decode_read_value(data, self.read_type, int(func_id))
             if tag == "manual":
                 self.lbl_read_value.setText(f"Read: {text}")
-            elif tag == "param":
-                self._apply_param_read(int(func_id), data)
             self.read_pending = False
             with self.read_lock:
                 self.read_watch["eid"] = None
@@ -236,6 +260,8 @@ class UtilsMixin:
             if tag == "param":
                 if self.read_retry_left > 0 and self.read_param_current is not None:
                     self.param_read_queue.insert(0, (self.read_param_current, self.read_retry_left - 1))
+                else:
+                    self._log(f"Read Params timeout: driver={self.param_read_driver_id}, mode=0x{int(func_id):02X}")
                 self._request_next_param_read()
 
     def _on_mode_changed(self):
@@ -280,11 +306,16 @@ class UtilsMixin:
         if self.manager.bus is None:
             self._log("버스 미연결")
             return
+        if self.read_pending:
+            self._log("읽기 진행 중 — 완료 후 Send Params를 누르세요.")
+            return
         motor_id = self.spin_driver.value()
         try:
             bw = float(self.spin_ctrl_bw.value())
             kp = float(self.spin_ctrl_kp.value())
             ki = float(self.spin_ctrl_ki.value())
+            pos_kp = float(self.spin_ctrl_pos_kp.value())
+            pos_kd = float(self.spin_ctrl_pos_kd.value())
         except Exception:
             self._log("Control Params 값 오류")
             return
@@ -292,10 +323,17 @@ class UtilsMixin:
             payload_bw = struct.pack(">f", bw)
             payload_kp = struct.pack(">f", kp)
             payload_ki = struct.pack(">f", ki)
+            # Validate both position gains before submitting any writes.
+            payload_pos_kp = pack_position_gain(pos_kp)
+            payload_pos_kd = pack_position_gain(pos_kd)
             self.manager.send_ext(build_ext_id(0x11, motor_id), payload_bw)
             self.manager.send_ext(build_ext_id(0x20, motor_id), payload_kp)
             self.manager.send_ext(build_ext_id(0x21, motor_id), payload_ki)
-            self._log(f"Ctrl Params queued: BW={bw}, KP={kp}, KI={ki}")
+            self.manager.send_ext(build_ext_id(0x22, motor_id), payload_pos_kp)
+            self.manager.send_ext(build_ext_id(0x23, motor_id), payload_pos_kd)
+            self._log(f"Ctrl Params queued: BW={bw}, KP={kp}, KI={ki}, POS_KP={pos_kp}, POS_KD={pos_kd}")
+            self._log("RAM 게인 전송 후 읽기로 확인합니다. Flash 저장은 정지 상태에서 별도로 수행하세요.")
+            self._start_param_read()
         except Exception as e:
             self._log(f"Ctrl Params 실패: {e}")
 

@@ -246,8 +246,11 @@ class CANReaderThread(threading.Thread):
                 with self.read_lock:
                     watch_eid = self.read_watch.get("eid")
                     if watch_eid is not None and int(watch_eid) == int(eid):
-                        self.read_watch["data"] = bytes(data)
-                        self.read_watch["ts"] = getattr(msg, "timestamp", time.time())
+                        position_gain = eid >> 8 in (0xA2, 0xA3)
+                        if not position_gain or (msg.is_fd and msg.bitrate_switch
+                                                 and msg.dlc == 4 and len(data) == 4):
+                            self.read_watch["data"] = bytes(data)
+                            self.read_watch["ts"] = getattr(msg, "timestamp", time.time())
             if self.scan_hits is not None and self.scan_lock is not None:
                 eid = msg.arbitration_id
                 mode_id = (eid >> 8) & 0xFF

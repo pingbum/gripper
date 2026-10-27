@@ -12,6 +12,7 @@ STM32 G474 측 코드에 맞춘 프로토콜 구현:
   [6]    int8      => temp_C
   [7]    uint8     => error
 """
+import math
 import struct
 from typing import Dict, Tuple
 from config import (
@@ -28,6 +29,13 @@ def build_ext_id(mode_id: int, driver_id: int) -> int:
 
 def pack_s32_be(v: int) -> bytes:
     return struct.pack(">i", int(v))
+
+
+def pack_position_gain(gain: float) -> bytes:
+    """Finite, non-negative float32 BE position gain; no scaling."""
+    if not math.isfinite(gain) or gain < 0:
+        raise ValueError("Position gain must be finite and non-negative")
+    return struct.pack(">f", gain)
 
 def unpack_s16_be(b0: int, b1: int) -> int:
     return struct.unpack(">h", bytes([b0, b1]))[0]
