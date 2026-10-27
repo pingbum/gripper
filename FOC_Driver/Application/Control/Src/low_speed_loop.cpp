@@ -10,8 +10,8 @@ static control_instance_f32_t velocity_control;
 static control_instance_f32_t position_control;
 
 // Velocity loop gains.
-static float32_t Kp_vel = 0.003f;
-static float32_t Ki_vel = 0.000005f;
+static float32_t Kp_vel = 0.001f;
+static float32_t Ki_vel = 0.000003f;
 
 
 // Position loop gains: output-side degrees -> q-axis current [A].

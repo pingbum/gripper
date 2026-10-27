@@ -36,14 +36,17 @@ extern uint32_t FLASH_UPDATE;             // Calibration state flag.
 constexpr float32_t ADC_GAIN = 0.6f; // Current sense gain [V/A].
 
 // Motor parameters.
-// constexpr float32_t MOTOR_POLE_PAIRS = 7;
-constexpr float32_t MOTOR_POLE_PAIRS = 11;
+constexpr float32_t MOTOR_POLE_PAIRS = 7;
+// constexpr float32_t MOTOR_POLE_PAIRS = 11;
 
 // constexpr float32_t MOTOR_Ls = 0.000053f; // Series inductance [H].
-constexpr float32_t MOTOR_Ls = 0.000150f; // Series inductance [H].
+// constexpr float32_t MOTOR_Ls = 0.000150f; // Series inductance [H]. WK1806
+constexpr float32_t MOTOR_Ls = 0.00168f; // Series inductance [H]. GB2208
 
 // constexpr float32_t MOTOR_Rs = 2.82;        // Series resistance [ohm].
-constexpr float32_t MOTOR_Rs = 2.8;        // Series resistance [ohm].
+//constexpr float32_t MOTOR_Rs = 2.8;        // Series resistance [ohm]. WK1806
+constexpr float32_t MOTOR_Rs = 7.6;        // Series resistance [ohm]. GB2208
+
 
 // constexpr float32_t MOTOR_I_RATED = 0.66; // For Encoder Calibration [A].
 constexpr float32_t MOTOR_I_RATED = 1.2; // For Encoder Calibration [A].
