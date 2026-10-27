@@ -3,11 +3,13 @@
 #include "flash_memory.hpp"
 #include "low_speed_loop.hpp"
 #include "memory_constants.hpp"
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 
 namespace {
 constexpr uint32_t CONTROL_PARAM_MAGIC = 0x4350524Du;
+constexpr uint32_t POSITION_PARAM_MAGIC = 0x50504431u; // "PPD1" extension.
 constexpr uint16_t BROADCAST_RATE_MIN_HZ = 1;
 constexpr uint16_t BROADCAST_RATE_MAX_HZ = 1000;
 
@@ -17,9 +19,17 @@ struct __attribute__((packed, aligned(8))) ControlParamBlock_t {
   float32_t kp_vel;
   float32_t ki_vel;
   uint32_t can_broadcast_rate_hz;
+  // Preserve the complete legacy 24-byte prefix, including its tail padding.
+  uint32_t legacy_reserved;
+  uint32_t position_magic;
+  float32_t kp_pos;
+  float32_t kd_pos;
+  uint32_t reserved;
 };
-static_assert(sizeof(ControlParamBlock_t) == 24,
-              "ControlParamBlock_t must be 24 bytes");
+static_assert(offsetof(ControlParamBlock_t, position_magic) == 24,
+              "Legacy control parameter layout must not change");
+static_assert(sizeof(ControlParamBlock_t) == 40,
+              "ControlParamBlock_t must be 40 bytes");
 
 uint16_t s_can_broadcast_rate_hz = BROADCAST_RATE_MAX_HZ;
 
@@ -55,6 +65,12 @@ bool load_control_params_from_flash(void) {
     s_can_broadcast_rate_hz =
         static_cast<uint16_t>(block.can_broadcast_rate_hz);
   }
+  // Old firmware wrote only the legacy prefix. Leave position defaults alone
+  // unless this explicitly tagged extension exists; setters reject bad gains.
+  if (block.position_magic == POSITION_PARAM_MAGIC) {
+    position_loop_set_kp(block.kp_pos);
+    position_loop_set_kd(block.kd_pos);
+  }
   return true;
 }
 
@@ -62,10 +78,15 @@ bool save_control_params_to_flash(void) {
   float32_t kp_vel = 0.0f;
   float32_t ki_vel = 0.0f;
   velocity_loop_get_gains(&kp_vel, &ki_vel);
+  float32_t kp_pos = 0.0f;
+  float32_t kd_pos = 0.0f;
+  position_loop_get_gains(&kp_pos, &kd_pos);
 
   ControlParamBlock_t block = {CONTROL_PARAM_MAGIC,
                                current_loop_get_cutoff_freq(), kp_vel, ki_vel,
-                               s_can_broadcast_rate_hz};
+                               s_can_broadcast_rate_hz, 0xFFFFFFFFu,
+                               POSITION_PARAM_MAGIC, kp_pos, kd_pos,
+                               0xFFFFFFFFu};
 
   uint32_t status =
       write_flash_buffer(CONTROL_PARAM_FLASH_ADDR,
