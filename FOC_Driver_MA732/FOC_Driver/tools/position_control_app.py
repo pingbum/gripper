@@ -5,14 +5,17 @@
 - 채널(Driver ID) 0 / 1+2 / 3 을 세 섹션으로 나누어 제어한다. 모든 모터는 can0 하나를 공유한다.
 - [CAN 연결]  체크: 해당 섹션 상태 수신 시작 (첫 섹션 연결 시 버스 open, 마지막 해제 시 close).
 - [위치 제어] 체크: 위치 모드(0x05), 해제: 0 A(0x01) 전송으로 토크 OFF → 엔코더 값만 표시.
+- 모터가 여럿인 섹션(1+2)은 M 체크박스로 위치 제어에 참여할 모터를 고른다 (위치 제어 OFF에서만 변경).
 - 슬라이더 각도는 출력축 기준 0~90 deg. 모터축 명령 = 영점 오프셋 + 각도 * 기어비.
 - Initialize: 연결된 모터의 현재 위치를 0 deg(영점 오프셋)로 저장한다. 전자저울 영점과 같다.
 - 위치 Kp/Kd: app.py와 동일하게 mode 0x22/0x23, float32 BE 4 bytes.
 - Cogging Comp: 0x31 명령으로 LUT 코깅 보상 ON/OFF (펌웨어 부팅 기본값 ON). 섹션 연결 시에도 현재 상태를 보낸다.
 - Soft start: 위치 제어를 켤 때 Kp/Kd를 0에서 설정값까지 선형으로 올려 켜는 순간의 충격(D항 kick)을 없앤다.
+- M2 elec offset: Slave(M2) 전기각 오프셋을 0x24로 쓰고 0xA4로 읽으며, Save(0x10)로 플래시에 저장한다.
 - Smoothing ON: 위치 명령을 목표까지 최대 기울기 [출력축 deg/s]로 1차 선형 보간해 RAMP_MS 주기로 보낸다.
 """
 import math
+import struct
 import sys
 import threading
 import time
@@ -35,6 +38,9 @@ TX_BRS = False           # app.py의 socketcan 기본값과 동일 (Jetson TDC �
 
 MODE_SET_POSITION_KP = 0x22
 MODE_SET_POSITION_KD = 0x23
+MODE_SET_ELEC_OFFSET = 0x24   # Slave 전기각 오프셋, float32 BE [electrical deg] (RAM만 변경)
+MODE_SAVE_CTRL_PARAMS = 0x10  # 제어 파라미터 블록 전체(게인, 오프셋 등)를 플래시에 저장
+MODE_READ_FLAG = 0x80         # mode | 0x80 = 읽기 요청, 응답도 같은 EID
 
 GEAR_MOTOR0 = 10.0
 GEAR_FINGER = (66 / 20) ** 2
@@ -45,6 +51,10 @@ SECTIONS = (
     ("Channel 1 + 2", (1, 2), GEAR_FINGER, 0.002, 0.0001),
     ("Channel 3", (3,), GEAR_FINGER, 0.001, 0.0001),
 )
+
+ELEC_OFFSET_MOTOR = 2                  # 전기각 오프셋을 편집할 Slave Driver ID
+ELEC_OFFSET_LIMIT = 180.0              # 펌웨어가 [-180, 180]으로 정규화해 저장한다
+READ_TIMEOUT_S = 0.5                   # 읽기 응답 대기 시간
 
 REF_MIN_DEG, REF_MAX_DEG = 0.0, 90.0   # 출력축 위치 제약
 REF_SCALE = 10                         # 슬라이더 1칸 = 0.1 deg
@@ -147,6 +157,9 @@ class MotorSection(QtWidgets.QGroupBox):
     control_toggled = QtCore.pyqtSignal(bool)
     ref_changed = QtCore.pyqtSignal()
     gains_changed = QtCore.pyqtSignal()
+    offset_read = QtCore.pyqtSignal()
+    offset_write = QtCore.pyqtSignal(float)
+    offset_save = QtCore.pyqtSignal()
 
     def __init__(self, name, motor_ids, gear, kp_default, kd_default):
         super().__init__(f"{name}   (gear {gear:.2f})")
@@ -155,6 +168,10 @@ class MotorSection(QtWidgets.QGroupBox):
 
         self.cb_connect = QtWidgets.QCheckBox("CAN 연결")
         self.cb_control = QtWidgets.QCheckBox("위치 제어")
+        # 모터가 여럿인 섹션: 위치 제어에 참여할 모터 선택. Driver ID -> checkbox
+        self.cb_motors = {i: QtWidgets.QCheckBox(f"M{i}") for i in motor_ids} if len(motor_ids) > 1 else {}
+        for cb in self.cb_motors.values():
+            cb.setChecked(True)
         self.lbl_status = QtWidgets.QLabel()
         self.sld_ref = make_slider(int(REF_MAX_DEG * REF_SCALE), 0)
         self.sld_kp = make_slider(GAIN_STEPS, GAIN_STEPS // GAIN_RANGE)  # 시작 위치 = 기본값
@@ -162,18 +179,43 @@ class MotorSection(QtWidgets.QGroupBox):
         self.lbl_ref, self.lbl_kp, self.lbl_kd = (QtWidgets.QLabel() for _ in range(3))
         # 모터별 현재 각도 표시 (읽기 전용 바). Driver ID -> (bar, label)
         self.indicators = {i: (make_indicator(), QtWidgets.QLabel()) for i in motor_ids}
+        # Slave 전기각 오프셋 편집 (ELEC_OFFSET_MOTOR가 있는 섹션만)
+        self.offset_id = ELEC_OFFSET_MOTOR if ELEC_OFFSET_MOTOR in motor_ids else None
+        self.spin_offset = QtWidgets.QDoubleSpinBox()
+        self.spin_offset.setRange(-ELEC_OFFSET_LIMIT, ELEC_OFFSET_LIMIT)
+        self.spin_offset.setWrapping(True)
+        self.spin_offset.setDecimals(1)
+        self.spin_offset.setSingleStep(0.5)
+        self.spin_offset.setSuffix(" deg")
+        self.spin_offset.setKeyboardTracking(False)
+        self.btn_offset_read, self.btn_offset_write, self.btn_offset_save = (
+            QtWidgets.QPushButton(text) for text in ("Read", "Write", "Save"))
+        self.btn_offset_save.setToolTip("M2 제어 파라미터 전체를 플래시에 저장 (위치 제어 OFF에서만)")
+        self.lbl_offset = QtWidgets.QLabel()
+        # 부모 없는 위젯이 지워지지 않도록 속성으로 붙잡아 둔다 (오프셋이 없는 섹션은 레이아웃에 안 넣음).
+        self.offset_row = offset_row = QtWidgets.QWidget()
+        offset_box = QtWidgets.QHBoxLayout(offset_row)
+        offset_box.setContentsMargins(0, 0, 0, 0)
+        for widget in (self.spin_offset, self.btn_offset_read, self.btn_offset_write,
+                       self.btn_offset_save):
+            offset_box.addWidget(widget)
+        offset_box.addStretch()
 
         top = QtWidgets.QHBoxLayout()
         top.addWidget(self.cb_connect)
         top.addWidget(self.cb_control)
+        for cb in self.cb_motors.values():
+            top.addWidget(cb)
         top.addStretch()
         top.addWidget(self.lbl_status)
         grid = QtWidgets.QGridLayout(self)
         grid.addLayout(top, 0, 0, 1, 3)
-        rows = (("Position", self.sld_ref, self.lbl_ref),
-                *((f"M{i} actual", bar, label) for i, (bar, label) in self.indicators.items()),
-                ("P gain", self.sld_kp, self.lbl_kp),
-                ("D gain", self.sld_kd, self.lbl_kd))
+        rows = [("Position", self.sld_ref, self.lbl_ref),
+                *((f"M{i} actual", bar, label) for i, (bar, label) in self.indicators.items())]
+        if self.offset_id is not None:
+            rows.append((f"M{self.offset_id} elec offset", offset_row, self.lbl_offset))
+        rows += [("P gain", self.sld_kp, self.lbl_kp),
+                 ("D gain", self.sld_kd, self.lbl_kd)]
         for row, (text, slider, label) in enumerate(rows, start=1):
             label.setMinimumWidth(190)
             grid.addWidget(QtWidgets.QLabel(text), row, 0)
@@ -183,17 +225,27 @@ class MotorSection(QtWidgets.QGroupBox):
 
         self.cb_connect.toggled.connect(self.connect_toggled)
         self.cb_control.toggled.connect(self.sld_ref.setEnabled)
+        self.cb_control.toggled.connect(self._update_motor_select)
         self.cb_control.toggled.connect(self.control_toggled)
         self.sld_ref.valueChanged.connect(self._on_ref_slider)
         for slider in (self.sld_kp, self.sld_kd):
             slider.valueChanged.connect(self._on_gain_slider)
             slider.sliderReleased.connect(self.gains_changed)
+        self.btn_offset_read.clicked.connect(self.offset_read)
+        self.btn_offset_write.clicked.connect(lambda: self.offset_write.emit(self.spin_offset.value()))
+        self.btn_offset_save.clicked.connect(self.offset_save)
         self._update_labels()
         self.set_connected(False)
 
     @property
     def ref_deg(self):
         return self.sld_ref.value() / REF_SCALE
+
+    @property
+    def active_ids(self):
+        """위치 제어에 참여하는 Driver ID. 단일 모터 섹션은 항상 그 모터."""
+        return tuple(i for i in self.motor_ids
+                     if i not in self.cb_motors or self.cb_motors[i].isChecked())
 
     @property
     def kp(self):
@@ -216,6 +268,7 @@ class MotorSection(QtWidgets.QGroupBox):
         checkbox.setChecked(False)
         checkbox.blockSignals(False)
         self.sld_ref.setEnabled(self.cb_control.isChecked())
+        self._update_motor_select()
 
     def set_actual(self, motor_id, deg, current=None):
         """현재 각도/전류 표시. 바는 0~90 deg로 자르고, 숫자는 실제 값을 보여준다. None = 수신 없음."""
@@ -227,15 +280,34 @@ class MotorSection(QtWidgets.QGroupBox):
             bar.setValue(round(clamp(deg, REF_MIN_DEG, REF_MAX_DEG) * REF_SCALE))
             label.setText(f"{deg:5.1f} deg  {current:6.3f} A")
 
+    def set_offset(self, deg):
+        """펌웨어에서 읽은 오프셋 표시. None = 응답 없음."""
+        if deg is None:
+            self.lbl_offset.setText("dev  --  deg")
+            return
+        self.spin_offset.setValue(deg)
+        self.lbl_offset.setText(f"dev {deg:6.1f} deg")
+
     def set_connected(self, connected):
+        for widget in (self.spin_offset, self.btn_offset_read, self.btn_offset_write,
+                       self.btn_offset_save):
+            widget.setEnabled(connected)
         self.cb_control.setEnabled(connected)
         self.sld_kp.setEnabled(connected)
         self.sld_kd.setEnabled(connected)
         self.sld_ref.setEnabled(connected and self.cb_control.isChecked())
+        self._update_motor_select()
         if not connected:
             self.lbl_status.setText("disconnected")
+            self.set_offset(None)
             for motor_id in self.motor_ids:
                 self.set_actual(motor_id, None)
+
+    def _update_motor_select(self):
+        # 위치 제어 중에는 참여 모터를 바꾸지 못하게 잠근다.
+        editable = self.cb_control.isEnabled() and not self.cb_control.isChecked()
+        for cb in self.cb_motors.values():
+            cb.setEnabled(editable)
 
     def _update_labels(self):
         self.lbl_ref.setText(f"{self.ref_deg:5.1f} deg")
@@ -388,6 +460,10 @@ class PositionControlApp(QtWidgets.QMainWindow):
         self.status = {}  # Driver ID -> (수신 시각, 모터축 위치 deg, 에러 코드, 전류 A)
         self.cmd = {}     # MotorSection -> 마지막으로 보낸 출력축 위치 명령 [deg]
         self.softstart = {}  # MotorSection -> 게인 램프 시작 시각 (진행 중인 섹션만)
+        # 파라미터 읽기 응답: 수신 스레드가 eid가 같은 프레임의 data를 채운다.
+        self.read_lock = threading.Lock()
+        self.read_watch = {"eid": None, "data": None, "ts": None}
+        self.read_pending = None  # (MotorSection, 응답 마감 시각)
 
         self._build_ui()
         self.timer = QtCore.QTimer(self)
@@ -464,6 +540,9 @@ class PositionControlApp(QtWidgets.QMainWindow):
             sec.control_toggled.connect(partial(self._on_control, sec))
             sec.ref_changed.connect(partial(self._send_ref, sec))
             sec.gains_changed.connect(partial(self._on_gains_changed, sec))
+            sec.offset_read.connect(partial(self._request_offset_read, sec))
+            sec.offset_write.connect(partial(self._on_offset_write, sec))
+            sec.offset_save.connect(partial(self._on_offset_save, sec))
             left.addWidget(sec)
         left.addStretch()
         self.finger = FingerView()
@@ -491,6 +570,7 @@ class PositionControlApp(QtWidgets.QMainWindow):
         self.status.clear()
         self.reader_stop.clear()
         self.reader = CANReaderThread(self.manager.bus, self.reader_stop,
+                                      read_watch=self.read_watch, read_lock=self.read_lock,
                                       on_error=self.manager.writer.stop,
                                       on_warning=self.manager.writer.pause)
         self.reader.start()
@@ -513,6 +593,7 @@ class PositionControlApp(QtWidgets.QMainWindow):
         self.manager.disconnect()
         self.reader = None
         self.status.clear()
+        self._clear_read()
         self._log("CAN closed")
 
     def _send(self, mode_id, motor_id, payload):
@@ -538,11 +619,11 @@ class PositionControlApp(QtWidgets.QMainWindow):
             return None
         return sample[3]
 
-    def _section_deg(self, sec):
+    def _section_deg(self, sec, motor_ids=None):
         """섹션의 현재 출력축 각도 (함께 도는 모터는 평균). 연결/수신이 없으면 None."""
         if not sec.cb_connect.isChecked():
             return None
-        positions = [self._output_deg(i, sec.gear) for i in sec.motor_ids]
+        positions = [self._output_deg(i, sec.gear) for i in motor_ids or sec.motor_ids]
         if None in positions:
             return None
         return sum(positions) / len(positions)
@@ -554,7 +635,7 @@ class PositionControlApp(QtWidgets.QMainWindow):
         self.cmd[sec] = target
         # list로 모아 실패가 있어도 섹션의 모든 모터에 같은 명령을 시도한다.
         return all([self._send(MODE_POSITION, i, pack_command_payload(
-            MODE_POSITION, self.offsets[i] + target * sec.gear)) for i in sec.motor_ids])
+            MODE_POSITION, self.offsets[i] + target * sec.gear)) for i in sec.active_ids])
 
     def _send_ref(self, sec):
         """슬라이더 목표 반영. Smoothing ON이면 _ramp가 기울기 제한을 지키며 따라간다."""
@@ -601,7 +682,7 @@ class PositionControlApp(QtWidgets.QMainWindow):
         """슬라이더 게인 * scale 전송. scale < 1은 소프트 스타트 중간값이라 로그를 남기지 않는다."""
         kp, kd = pack_position_gain(sec.kp * scale), pack_position_gain(sec.kd * scale)
         ok = all([self._send(MODE_SET_POSITION_KP, i, kp) and self._send(MODE_SET_POSITION_KD, i, kd)
-                  for i in sec.motor_ids])
+                  for i in sec.active_ids])
         if ok and scale >= 1.0:
             self._log(f"{sec.name}: Kp={sec.kp:.6f}, Kd={sec.kd:.6f} 전송")
         return ok
@@ -616,8 +697,58 @@ class PositionControlApp(QtWidgets.QMainWindow):
         payload = bytes([1 if self.btn_cogging.isChecked() else 0]) + bytes(7)
         return all([self._send(MODE_COGGING_TOGGLE, i, payload) for i in sec.motor_ids])
 
+    # ------------- M2 전기각 오프셋 -------------
+    def _clear_read(self):
+        self.read_pending = None
+        with self.read_lock:
+            for key in self.read_watch:
+                self.read_watch[key] = None
+
+    def _request_offset_read(self, sec):
+        """0xA4 읽기 요청. 응답은 _check_offset_read가 _poll에서 처리한다."""
+        eid = build_ext_id(MODE_SET_ELEC_OFFSET | MODE_READ_FLAG, sec.offset_id)
+        with self.read_lock:
+            self.read_watch.update(eid=eid, data=None, ts=None)
+        if self._send(MODE_SET_ELEC_OFFSET | MODE_READ_FLAG, sec.offset_id, bytes(8)):
+            self.read_pending = (sec, time.monotonic() + READ_TIMEOUT_S)
+        else:
+            self._clear_read()
+
+    def _check_offset_read(self):
+        if self.read_pending is None:
+            return
+        sec, deadline = self.read_pending
+        with self.read_lock:
+            data = self.read_watch["data"]
+        if data is not None and len(data) >= 4:
+            deg = struct.unpack(">f", data[:4])[0]
+            self._clear_read()
+            if math.isfinite(deg):
+                sec.set_offset(deg)
+                self._log(f"M{sec.offset_id}: elec offset = {deg:.2f} deg")
+            else:
+                self._log(f"M{sec.offset_id}: elec offset 응답이 유효하지 않습니다 ({data.hex(' ')})")
+        elif time.monotonic() > deadline:
+            self._clear_read()
+            sec.set_offset(None)
+            self._log(f"M{sec.offset_id}: elec offset 읽기 응답 없음 (펌웨어 0x24 지원 확인)")
+
+    def _on_offset_write(self, sec, deg):
+        """0x24 쓰기(RAM만) 후 바로 읽어 펌웨어에 적용된 값(정규화 포함)을 확인한다."""
+        if self._send(MODE_SET_ELEC_OFFSET, sec.offset_id, struct.pack(">f", deg)):
+            self._log(f"M{sec.offset_id}: elec offset {deg:.2f} deg 전송")
+            self._request_offset_read(sec)
+
+    def _on_offset_save(self, sec):
+        # 플래시 erase 동안 펌웨어 인터럽트가 꺼져 제어 루프가 멈추므로 토크가 없을 때만 저장한다.
+        if sec.cb_control.isChecked():
+            self._log(f"M{sec.offset_id}: 위치 제어 OFF 상태에서만 플래시 저장할 수 있습니다.")
+            return
+        if self._send(MODE_SAVE_CTRL_PARAMS, sec.offset_id, bytes(8)):
+            self._log(f"M{sec.offset_id}: 제어 파라미터 플래시 저장 요청 (게인 + elec offset)")
+
     def _release(self, sec):
-        """0 A 전류 명령으로 토크를 끈다."""
+        """0 A 전류 명령으로 토크를 끈다. 선택 안 된 모터도 포함해 섹션 전체에 보낸다."""
         for motor_id in sec.motor_ids:
             self._send(MODE_CURRENT, motor_id, pack_command_payload(MODE_CURRENT, 0.0))
 
@@ -635,6 +766,8 @@ class PositionControlApp(QtWidgets.QMainWindow):
             # 앱 재시작 등으로 펌웨어 상태를 모르므로 연결할 때 버튼 상태로 맞춘다.
             if self._send_cogging(sec):
                 self._log(f"{sec.name}: Cogging Comp {'ON' if self.btn_cogging.isChecked() else 'OFF'}")
+            if sec.offset_id is not None:
+                self._request_offset_read(sec)
             return
         if sec.cb_control.isChecked():
             sec.cb_control.setChecked(False)  # → _on_control: 0 A로 토크 해제
@@ -650,7 +783,11 @@ class PositionControlApp(QtWidgets.QMainWindow):
             self._release(sec)
             self._log(f"{sec.name}: 위치 제어 OFF (0 A)")
             return
-        current = self._section_deg(sec)
+        if not sec.active_ids:
+            self._log(f"{sec.name}: 선택된 모터가 없어 위치 제어를 켤 수 없습니다.")
+            sec.force_off(sec.cb_control)
+            return
+        current = self._section_deg(sec, sec.active_ids)
         if current is None:
             self._log(f"{sec.name}: 상태 수신 없음, 위치 제어를 켤 수 없습니다.")
             sec.force_off(sec.cb_control)
@@ -667,7 +804,8 @@ class PositionControlApp(QtWidgets.QMainWindow):
             return
         if soft:
             self.softstart[sec] = time.monotonic()
-        self._log(f"{sec.name}: 위치 제어 ON, 목표 {sec.ref_deg:.1f} deg"
+        motors = "+".join(f"M{i}" for i in sec.active_ids)
+        self._log(f"{sec.name}: 위치 제어 ON ({motors}), 목표 {sec.ref_deg:.1f} deg"
                   + (f", soft start {self.spin_softstart.value():.2f} s" if soft else ""))
 
     def _on_cogging(self, checked):
@@ -743,6 +881,7 @@ class PositionControlApp(QtWidgets.QMainWindow):
                 sec.lbl_status.setText(self._status_text(sec))
                 for i in sec.motor_ids:
                     sec.set_actual(i, self._output_deg(i, sec.gear), self._current_a(i))
+        self._check_offset_read()
         self._update_finger()
 
     def _update_finger(self):
