@@ -53,7 +53,7 @@ constexpr float32_t V_DC = 12;              // DC link voltage [V].
 
 // Controller limits.
 constexpr float32_t VOLTAGE_MAX = V_DC; // Max voltage command [V].
-constexpr float32_t CURRENT_MAX = 0.8f; // Max current magnitude [A]..
+constexpr float32_t CURRENT_MAX = 1.2f; // Max current magnitude [A]..
 
 // Conversions.
 constexpr float32_t RPM_TO_DEG_PER_SEC = 6.0f;
