@@ -61,8 +61,17 @@ REF_SCALE = 10                         # 슬라이더 1칸 = 0.1 deg
 GAIN_RANGE = 10                        # 게인 슬라이더 범위 = 0 ~ 기본값 * 10
 GAIN_STEPS = 1000                      # 게인 슬라이더 1칸 = 최대값 / 1000
 
-# 손가락 그림: 링크 길이 비율. 관절0은 고정(수직), 관절1 = Channel 1+2, 관절2 = Channel 3.
-FINGER_LINKS = (5.0, 3.5, 3.5)
+# 손가락 기하 [mm]: 기준 자세(모든 관절 0 deg)의 굽힘 평면 좌표. 원점 = MCP F/E 축,
+# X = 오른쪽(굽힘 방향), Y = 위쪽, Z = 화면 밖. F/E 축은 모두 Z 방향, A/A 축은 X 방향.
+# 관절0 = MCP F/E (다이나믹셀, 아직 0 deg 고정), 관절1 = Channel 1+2 (PIP), 관절2 = Channel 3 (DIP).
+AA_AXIS_Y = -17.48                     # MCP A/A 축 위치 (0, AA_AXIS_Y, 0)
+FINGER_JOINTS = ((0.0, 0.0), (7.0, 51.36), (7.0, 51.36 + 35.93))  # MCP, PIP, DIP F/E 축
+TIP_LENGTH, TIP_RADIUS = 28.0, 12.0    # 손끝 = DIP 축에서 +Y로 뻗는 원기둥(직경 24) + 같은 직경의 반구
+CONTACT_OFFSET_X = 3.5                 # 물체가 닿았으면 하는 위치 = 반구 중심 + X (기준점 아님, 현재 미사용)
+FINGER_TIP = (FINGER_JOINTS[-1][0], FINGER_JOINTS[-1][1] + TIP_LENGTH)  # 손끝 기준점 = 반구 중심
+# 기준 자세 링크 벡터: MCP→PIP, PIP→DIP, DIP→손끝 기준점
+FINGER_LINKS = tuple((x1 - x0, y1 - y0) for (x0, y0), (x1, y1)
+                     in zip(FINGER_JOINTS, FINGER_JOINTS[1:] + (FINGER_TIP,)))
 FINGER_SECTIONS = (1, 2)               # 관절1, 관절2를 구동하는 SECTIONS 인덱스
 
 SLOPE_DEFAULT = 300.0                  # 위치 명령 최대 기울기 기본값 [출력축 deg/s]
@@ -84,32 +93,51 @@ def clamp(value, low, high):
     return max(low, min(high, value))
 
 
-def make_slider(maximum, value):
+def make_slider(minimum, maximum, value):
     slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-    slider.setRange(0, maximum)
+    slider.setRange(minimum, maximum)
     slider.setValue(value)
     slider.setMinimumWidth(360)
     return slider
 
 
-def make_indicator():
-    """위치 슬라이더와 같은 눈금(0~90 deg, 0.1 deg)의 읽기 전용 막대."""
+def make_indicator(low, high):
+    """위치 슬라이더와 같은 눈금(low~high deg, 0.1 deg)의 읽기 전용 막대."""
     bar = QtWidgets.QProgressBar()
-    bar.setRange(0, int(REF_MAX_DEG * REF_SCALE))
+    bar.setRange(round(low * REF_SCALE), round(high * REF_SCALE))
     bar.setTextVisible(False)
     bar.setFixedHeight(12)
     return bar
 
 
+def rotate(vector, deg):
+    """굽힘 평면 벡터를 deg만큼 +X 쪽(시계 방향)으로 돌린다."""
+    c, s = math.cos(math.radians(deg)), math.sin(math.radians(deg))
+    return vector[0] * c + vector[1] * s, -vector[0] * s + vector[1] * c
+
+
+def heading(vector):
+    """+Y에서 +X 쪽(시계 방향)으로 잰 벡터 방향 [deg]."""
+    return math.degrees(math.atan2(vector[0], vector[1]))
+
+
 def finger_points(angles):
-    """순기구학: 관절 각 [deg, 앞 링크 기준] → 바닥, J1, J2, 손끝 좌표 (링크 길이 단위, y 위쪽)."""
-    points, x, y, absolute = [(0.0, 0.0)], 0.0, 0.0, 0.0
-    for length, joint in zip(FINGER_LINKS, (0.0, *angles)):
-        absolute += math.radians(joint)
-        x += length * math.sin(absolute)
-        y += length * math.cos(absolute)
-        points.append((x, y))
+    """순기구학: 관절 각 [deg, 앞 링크 기준] → MCP, J1(PIP), J2(DIP), 손끝 좌표 [mm]. MCP F/E = 0."""
+    points, absolute = [(0.0, 0.0)], 0.0
+    for link, joint in zip(FINGER_LINKS, (0.0, *angles)):
+        absolute += joint
+        dx, dy = rotate(link, absolute)
+        points.append((points[-1][0] + dx, points[-1][1] + dy))
     return points
+
+
+def finger_workspace(n=30):
+    """손끝 도달 가능 영역 경계 = 관절 범위(0~90)x(0~90) 사각형의 네 변을 따라간 손끝 궤적."""
+    low, high = REF_MIN_DEG, REF_MAX_DEG
+    ramp = [low + (high - low) * k / n for k in range(n + 1)]
+    edges = ([(q, low) for q in ramp] + [(high, q) for q in ramp]
+             + [(q, high) for q in reversed(ramp)] + [(low, q) for q in reversed(ramp)])
+    return [finger_points(edge)[-1] for edge in edges]
 
 
 def nearest_in_range(angle, low=REF_MIN_DEG, high=REF_MAX_DEG):
@@ -122,19 +150,20 @@ def nearest_in_range(angle, low=REF_MIN_DEG, high=REF_MAX_DEG):
 
 
 def finger_ik(x, y):
-    """역기구학: 손끝 목표 (x, y) → (q1, q2), 항상 0~90 deg.
+    """역기구학: 손끝 목표 (x, y) [mm] → (q1, q2), 항상 0~90 deg. MCP F/E = 0.
 
     q1을 슬라이더 해상도(0.1 deg)로 훑고, 각 q1에서 손끝에 가장 가까운 q2를 직접 구한다.
     도달할 수 없는 목표는 자연히 가장 가까운 도달 가능 위치의 각도가 된다.
     """
-    l0, l1, l2 = FINGER_LINKS
+    pip, middle, distal = FINGER_LINKS
     best = None
     for step in range(round(REF_MIN_DEG * REF_SCALE), round(REF_MAX_DEG * REF_SCALE) + 1):
         q1 = step / REF_SCALE
-        jx, jy = l1 * math.sin(math.radians(q1)), l0 + l1 * math.cos(math.radians(q1))
-        q2 = nearest_in_range(math.degrees(math.atan2(x - jx, y - jy)) - q1)
-        tip = math.radians(q1 + q2)
-        dist = math.hypot(jx + l2 * math.sin(tip) - x, jy + l2 * math.cos(tip) - y)
+        mx, my = rotate(middle, q1)
+        jx, jy = pip[0] + mx, pip[1] + my
+        q2 = nearest_in_range(heading((x - jx, y - jy)) - heading(distal) - q1)
+        tx, ty = rotate(distal, q1 + q2)
+        dist = math.hypot(jx + tx - x, jy + ty - y)
         if best is None or dist < best[0]:
             best = (dist, q1, q2)
     return best[1], best[2]
@@ -161,9 +190,11 @@ class MotorSection(QtWidgets.QGroupBox):
     offset_write = QtCore.pyqtSignal(float)
     offset_save = QtCore.pyqtSignal()
 
-    def __init__(self, name, motor_ids, gear, kp_default, kd_default):
+    def __init__(self, name, motor_ids, gear, kp_default, kd_default,
+                 limits=(REF_MIN_DEG, REF_MAX_DEG)):
         super().__init__(f"{name}   (gear {gear:.2f})")
         self.name, self.motor_ids, self.gear = name, motor_ids, gear
+        self.low, self.high = limits  # 출력축 위치 제약 [deg]
         self.kp_max, self.kd_max = kp_default * GAIN_RANGE, kd_default * GAIN_RANGE
 
         self.cb_connect = QtWidgets.QCheckBox("CAN 연결")
@@ -173,12 +204,14 @@ class MotorSection(QtWidgets.QGroupBox):
         for cb in self.cb_motors.values():
             cb.setChecked(True)
         self.lbl_status = QtWidgets.QLabel()
-        self.sld_ref = make_slider(int(REF_MAX_DEG * REF_SCALE), 0)
-        self.sld_kp = make_slider(GAIN_STEPS, GAIN_STEPS // GAIN_RANGE)  # 시작 위치 = 기본값
-        self.sld_kd = make_slider(GAIN_STEPS, GAIN_STEPS // GAIN_RANGE)
+        self.sld_ref = make_slider(round(self.low * REF_SCALE), round(self.high * REF_SCALE),
+                                   round(clamp(0.0, self.low, self.high) * REF_SCALE))
+        self.sld_kp = make_slider(0, GAIN_STEPS, GAIN_STEPS // GAIN_RANGE)  # 시작 위치 = 기본값
+        self.sld_kd = make_slider(0, GAIN_STEPS, GAIN_STEPS // GAIN_RANGE)
         self.lbl_ref, self.lbl_kp, self.lbl_kd = (QtWidgets.QLabel() for _ in range(3))
         # 모터별 현재 각도 표시 (읽기 전용 바). Driver ID -> (bar, label)
-        self.indicators = {i: (make_indicator(), QtWidgets.QLabel()) for i in motor_ids}
+        self.indicators = {i: (make_indicator(self.low, self.high), QtWidgets.QLabel())
+                           for i in motor_ids}
         # Slave 전기각 오프셋 편집 (ELEC_OFFSET_MOTOR가 있는 섹션만)
         self.offset_id = ELEC_OFFSET_MOTOR if ELEC_OFFSET_MOTOR in motor_ids else None
         self.spin_offset = QtWidgets.QDoubleSpinBox()
@@ -258,7 +291,7 @@ class MotorSection(QtWidgets.QGroupBox):
     def set_ref(self, deg):
         """프로그램이 목표를 옮길 때 사용 (ref_changed 미발생)."""
         self.sld_ref.blockSignals(True)
-        self.sld_ref.setValue(round(clamp(deg, REF_MIN_DEG, REF_MAX_DEG) * REF_SCALE))
+        self.sld_ref.setValue(round(clamp(deg, self.low, self.high) * REF_SCALE))
         self.sld_ref.blockSignals(False)
         self._update_labels()
 
@@ -271,13 +304,13 @@ class MotorSection(QtWidgets.QGroupBox):
         self._update_motor_select()
 
     def set_actual(self, motor_id, deg, current=None):
-        """현재 각도/전류 표시. 바는 0~90 deg로 자르고, 숫자는 실제 값을 보여준다. None = 수신 없음."""
+        """현재 각도/전류 표시. 바는 위치 제약으로 자르고, 숫자는 실제 값을 보여준다. None = 수신 없음."""
         bar, label = self.indicators[motor_id]
         if deg is None:
-            bar.setValue(0)
+            bar.setValue(bar.minimum())
             label.setText("  --  deg     --  A")
         else:
-            bar.setValue(round(clamp(deg, REF_MIN_DEG, REF_MAX_DEG) * REF_SCALE))
+            bar.setValue(round(clamp(deg, self.low, self.high) * REF_SCALE))
             label.setText(f"{deg:5.1f} deg  {current:6.3f} A")
 
     def set_offset(self, deg):
@@ -329,9 +362,9 @@ class MotorSection(QtWidgets.QGroupBox):
 # 4. 손가락 그림: 현재 각도로 옆에서 본 손가락을 그린다.
 # =====================================================================
 class FingerView(QtWidgets.QWidget):
-    """0 deg = 수직. 관절 각은 앞 링크 기준 상대각이며 오른쪽으로 굽힌다.
+    """0 deg = 기준 자세. 관절 각은 앞 링크 기준 상대각이며 오른쪽(+X)으로 굽힌다.
 
-    실선 = 현재(엔코더), 점선 = 목표, 연한 파란 영역 = 손끝 도달 가능 범위.
+    실선 = 현재(엔코더), 점선 = 목표, 연한 파란 영역 = 손끝 도달 가능 범위, 외곽선 = 손끝 형상.
     두 관절 모두 위치 제어 중일 때 목표 손끝(주황 원)을 드래그하면 target_dragged(q1, q2)를 보낸다.
     """
     target_dragged = QtCore.pyqtSignal(float, float)
@@ -343,12 +376,10 @@ class FingerView(QtWidgets.QWidget):
         self.angles = [None] * len(FINGER_SECTIONS)   # 현재 [deg], None = 수신 없음
         self.targets = [None] * len(FINGER_SECTIONS)  # 목표 [deg], None = 위치 제어 OFF
         self.dragging = False
-        # 도달 가능 영역 경계 = 관절 범위(0~90)x(0~90) 사각형의 네 변을 따라간 손끝 궤적
-        n, low, high = 30, REF_MIN_DEG, REF_MAX_DEG
-        ramp = [low + (high - low) * k / n for k in range(n + 1)]
-        edges = ([(q, low) for q in ramp] + [(high, q) for q in ramp]
-                 + [(q, high) for q in reversed(ramp)] + [(low, q) for q in reversed(ramp)])
-        self.workspace = [finger_points(edge)[-1] for edge in edges]
+        self.workspace = finger_workspace()
+        # 그림 범위 [mm] (x0, x1, y0, y1): A/A 축, 기준 자세, 도달 영역 + 손끝 반지름
+        xs, ys = zip((0.0, AA_AXIS_Y), *finger_points((0.0, 0.0)), *self.workspace)
+        self.bounds = (min(xs) - TIP_RADIUS, max(xs) + TIP_RADIUS, min(ys), max(ys) + TIP_RADIUS)
 
     def set_state(self, angles, targets):
         if (angles, targets) != (self.angles, self.targets):
@@ -356,11 +387,11 @@ class FingerView(QtWidgets.QWidget):
             self.update()
 
     def _transform(self):
-        """(원점 x, 원점 y, 배율): 링크 길이 단위 → 픽셀. 손끝은 x 0~7, y 0~12 안에 있다."""
-        reach_x, reach_y = sum(FINGER_LINKS[1:]), sum(FINGER_LINKS)
+        """(원점 x, 원점 y, 배율): mm → 픽셀. 그림 범위(self.bounds)를 창 가운데에 맞춘다."""
+        x0, x1, y0, y1 = self.bounds
         margin = 50
-        scale = min((self.width() - 2 * margin) / reach_x, (self.height() - 2 * margin) / reach_y)
-        return (self.width() - reach_x * scale) / 2, self.height() - margin, scale
+        scale = min((self.width() - 2 * margin) / (x1 - x0), (self.height() - 2 * margin) / (y1 - y0))
+        return (self.width() - (x1 - x0) * scale) / 2 - x0 * scale, self.height() - margin + y0 * scale, scale
 
     def _to_screen(self, point):
         ox, oy, scale = self._transform()
@@ -395,20 +426,27 @@ class FingerView(QtWidgets.QWidget):
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
         painter.fillRect(self.rect(), QtGui.QColor("#252526"))
-        width = max(8.0, 0.8 * self._transform()[2])
+        scale = self._transform()[2]
+        width = max(8.0, TIP_RADIUS * scale)  # 링크 굵기 = 손끝 직경의 절반
 
         painter.setPen(QtCore.Qt.NoPen)
         painter.setBrush(QtGui.QColor(86, 156, 214, 45))
         painter.drawPolygon(QtGui.QPolygonF([self._to_screen(p) for p in self.workspace]))
 
-        base = self._to_screen((0.0, 0.0))
+        base, mcp = self._to_screen((0.0, AA_AXIS_Y)), self._to_screen((0.0, 0.0))
         painter.setPen(QtGui.QPen(QtGui.QColor("#666666"), 4))
-        painter.drawLine(base - QtCore.QPointF(50, 0), base + QtCore.QPointF(50, 0))  # 바닥
+        painter.drawLine(base - QtCore.QPointF(50, 0), base + QtCore.QPointF(50, 0))  # A/A 축 (X 방향)
+        pen = QtGui.QPen(QtGui.QColor("#888888"), width)
+        pen.setCapStyle(QtCore.Qt.RoundCap)
+        painter.setPen(pen)
+        painter.drawLine(base, mcp)  # A/A → MCP F/E
 
-        points = [self._to_screen(p) for p in finger_points([a or 0.0 for a in self.angles])]
+        current = [a or 0.0 for a in self.angles]
+        points = [self._to_screen(p) for p in finger_points(current)]  # MCP, PIP, DIP, 반구 중심
+        colors = []
         for i in range(len(FINGER_LINKS)):
             if i == 0:
-                pen = QtGui.QPen(QtGui.QColor("#888888"), width)          # 고정 링크
+                pen = QtGui.QPen(QtGui.QColor("#888888"), width)          # 고정 링크 (MCP F/E)
             elif self.angles[i - 1] is None:
                 pen = QtGui.QPen(QtGui.QColor("#555555"), width, QtCore.Qt.DashLine)
             else:
@@ -416,10 +454,27 @@ class FingerView(QtWidgets.QWidget):
             pen.setCapStyle(QtCore.Qt.RoundCap)
             painter.setPen(pen)
             painter.drawLine(points[i], points[i + 1])
+            colors.append(pen.color())
+
+        # 손끝 형상: DIP 축에서 시작하는 원기둥 + 반구. 원기둥 축은 기준 자세에서 +Y이므로
+        # 관절 각의 합만큼 돌린다 (MCP F/E = 0).
+        radius, length = TIP_RADIUS * scale, TIP_LENGTH * scale
+        outline = QtGui.QPainterPath(QtCore.QPointF(-radius, 0))
+        outline.lineTo(-radius, -length)
+        outline.arcTo(QtCore.QRectF(-radius, -length - radius, 2 * radius, 2 * radius), 180, -180)
+        outline.lineTo(radius, 0)
+        outline.closeSubpath()
+        painter.save()
+        painter.translate(points[-2])
+        painter.rotate(sum(current))
+        painter.setPen(QtGui.QPen(colors[-1], 2))
+        painter.setBrush(QtCore.Qt.NoBrush)
+        painter.drawPath(outline)
+        painter.restore()
 
         painter.setPen(QtGui.QPen(QtGui.QColor("#1e1e1e"), 2))
         painter.setBrush(QtGui.QColor("#d4d4d4"))
-        for point in points[1:-1]:
+        for point in (base, *points[:-1]):  # A/A, MCP, PIP, DIP
             painter.drawEllipse(point, width * 0.45, width * 0.45)
 
         if any(t is not None for t in self.targets):
@@ -449,6 +504,8 @@ class FingerView(QtWidgets.QWidget):
 # 5. 메인 창: CAN 연결, 명령 전송, 상태 표시
 # =====================================================================
 class PositionControlApp(QtWidgets.QMainWindow):
+    SECTION_LIMITS = {}  # SECTIONS 인덱스 -> (최소, 최대) 출력축 deg. 없으면 REF_MIN_DEG~REF_MAX_DEG
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Finger Position Control")
@@ -534,7 +591,8 @@ class PositionControlApp(QtWidgets.QMainWindow):
 
         # 왼쪽: 섹션들, 오른쪽: 손가락 그림
         body, left = QtWidgets.QHBoxLayout(), QtWidgets.QVBoxLayout()
-        self.sections = [MotorSection(*spec) for spec in SECTIONS]
+        self.sections = [MotorSection(*spec, limits=self.SECTION_LIMITS.get(index, (REF_MIN_DEG, REF_MAX_DEG)))
+                         for index, spec in enumerate(SECTIONS)]
         for sec in self.sections:
             sec.connect_toggled.connect(partial(self._on_connect, sec))
             sec.control_toggled.connect(partial(self._on_control, sec))
@@ -545,12 +603,8 @@ class PositionControlApp(QtWidgets.QMainWindow):
             sec.offset_save.connect(partial(self._on_offset_save, sec))
             left.addWidget(sec)
         left.addStretch()
-        self.finger = FingerView()
-        self.finger.target_dragged.connect(self._on_finger_drag)
-        finger_box = QtWidgets.QGroupBox("Finger (side view)")
-        QtWidgets.QVBoxLayout(finger_box).addWidget(self.finger)
         body.addLayout(left, 1)
-        body.addWidget(finger_box)
+        body.addWidget(self._build_finger())
         vbox.addLayout(body)
 
         self.log = QtWidgets.QPlainTextEdit()
@@ -558,6 +612,14 @@ class PositionControlApp(QtWidgets.QMainWindow):
         self.log.setMaximumBlockCount(300)
         self.log.setMaximumHeight(140)
         vbox.addWidget(self.log)
+
+    def _build_finger(self):
+        """오른쪽 손가락 그림 영역. self.finger(FingerView)를 만들어야 한다."""
+        self.finger = FingerView()
+        self.finger.target_dragged.connect(self._on_finger_drag)
+        finger_box = QtWidgets.QGroupBox("Finger (side view)")
+        QtWidgets.QVBoxLayout(finger_box).addWidget(self.finger)
+        return finger_box
 
     def _log(self, msg):
         self.log.appendPlainText(f"[{time.strftime('%H:%M:%S')}] {msg}")
@@ -631,7 +693,7 @@ class PositionControlApp(QtWidgets.QMainWindow):
     # ------------- 명령 전송 -------------
     def _command(self, sec, deg):
         """출력축 위치 명령 deg를 섹션의 모든 모터에 보내고 마지막 명령으로 기록한다."""
-        target = clamp(deg, REF_MIN_DEG, REF_MAX_DEG)  # 위치 제약 최종 확인
+        target = clamp(deg, sec.low, sec.high)  # 위치 제약 최종 확인
         self.cmd[sec] = target
         # list로 모아 실패가 있어도 섹션의 모든 모터에 같은 명령을 시도한다.
         return all([self._send(MODE_POSITION, i, pack_command_payload(
@@ -674,7 +736,7 @@ class PositionControlApp(QtWidgets.QMainWindow):
             cmd = self.cmd.get(sec)
             if not sec.cb_control.isChecked() or cmd is None:
                 continue
-            error = clamp(sec.ref_deg, REF_MIN_DEG, REF_MAX_DEG) - cmd
+            error = clamp(sec.ref_deg, sec.low, sec.high) - cmd
             if error != 0.0:
                 self._command(sec, cmd + clamp(error, -max_step, max_step))
 
@@ -795,7 +857,8 @@ class PositionControlApp(QtWidgets.QMainWindow):
         # 현재 위치를 첫 목표로 잡아 켜는 순간 튀지 않게 한다.
         sec.set_ref(current)
         if abs(sec.ref_deg - current) > 0.1:
-            self._log(f"{sec.name}: 현재 {current:.1f} deg가 0~90 범위 밖 → {sec.ref_deg:.1f} deg로 이동")
+            self._log(f"{sec.name}: 현재 {current:.1f} deg가 {sec.low:g}~{sec.high:g} 범위 밖"
+                      f" → {sec.ref_deg:.1f} deg로 이동")
         # 소프트 스타트: 게인 0으로 위치 모드에 들어가면 첫 주기에 펌웨어 D항 상태(d[0])가
         # 현재 위치로 갱신되어 켜는 순간의 D항 kick이 없다. 이후 _ramp_gains가 게인을 올린다.
         soft = self.spin_softstart.value() > 0.0
@@ -835,7 +898,7 @@ class PositionControlApp(QtWidgets.QMainWindow):
         for index, angle in zip(FINGER_SECTIONS, angles):
             sec = self.sections[index]
             if sec.cb_control.isChecked():
-                sec.sld_ref.setValue(round(clamp(angle, REF_MIN_DEG, REF_MAX_DEG) * REF_SCALE))
+                sec.sld_ref.setValue(round(clamp(angle, sec.low, sec.high) * REF_SCALE))
         self._update_finger()
 
     def _on_initialize(self):
