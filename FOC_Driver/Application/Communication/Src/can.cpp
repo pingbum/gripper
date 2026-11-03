@@ -7,6 +7,7 @@
 #include "flash_memory.hpp"
 #include "low_speed_loop.hpp"
 #include "memory_constants.hpp"
+#include "position.hpp"
 #include <cstring>
 
 extern State_t state;
@@ -257,6 +258,9 @@ static void handle_rx_message(const FDCAN_RxHeaderTypeDef &rxh,
       position_loop_get_gains(&kp, &kd);
       f32_to_be32(base_mode == MODE_SET_POSITION_KP ? kp : kd, payload);
       length = 4;
+    } else if (base_mode == MODE_SET_ELEC_OFFSET) {
+      f32_to_be32(slave_elec_offset_get_deg(), payload);
+      length = 4;
     } else {
       return;
     }
@@ -288,6 +292,15 @@ static void handle_rx_message(const FDCAN_RxHeaderTypeDef &rxh,
           rxh.DataLength == FDCAN_DLC_BYTES_1))
       return;
     cogging_compensation_set_enabled(data[0] != 0U);
+    return;
+  }
+
+  // RAM only; persist with MODE_SAVE_CTRL_PARAMS. Out-of-range is ignored.
+  if (mode_id == MODE_SET_ELEC_OFFSET) {
+    float32_t value = 0.0f;
+    if (!parse_be_f32_payload(rxh, data, &value))
+      return;
+    slave_elec_offset_set_deg(value);
     return;
   }
 

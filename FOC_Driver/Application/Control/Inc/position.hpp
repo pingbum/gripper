@@ -8,8 +8,25 @@
 extern "C" {
 #endif
 
-/** Slave electrical offset relative to the master [deg]. Default +18. */
+/** Default slave electrical offset used when flash holds no saved value. */
+#define SLAVE_ELEC_OFFSET_DEFAULT_DEG (-82.7f)
+
+/** Slave electrical offset relative to the master [deg]. */
 extern volatile float32_t slave_elec_offset_deg;
+
+/**
+ * @brief Set the slave electrical offset (RAM only; persist with
+ *        save_control_params_to_flash()).
+ * @param offset_deg Offset in electrical degrees, accepted range [-360, 360].
+ *        Stored normalized to [-180, 180].
+ * @return True if the value is finite, in range and applied.
+ */
+bool slave_elec_offset_set_deg(float32_t offset_deg);
+
+/**
+ * @brief Get the slave electrical offset [deg, electrical].
+ */
+float32_t slave_elec_offset_get_deg(void);
 
 /**
  * @brief Initialize position tracking and calibration.

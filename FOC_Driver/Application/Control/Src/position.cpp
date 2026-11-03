@@ -1,10 +1,12 @@
 #include "position.hpp"
 #include "arm_math.h"
 #include <cmath>
+#include <cstring>
 
 // Electrical offset of the slave relative to the master [deg, electrical].
-// Positive value leads the master. Editable at runtime via debugger.
-volatile float32_t slave_elec_offset_deg = -122.7f;
+// Positive value leads the master. Loaded from flash at boot (control params
+// block); use slave_elec_offset_set_deg() to change it at runtime.
+volatile float32_t slave_elec_offset_deg = SLAVE_ELEC_OFFSET_DEFAULT_DEG;
 
 namespace
 {
@@ -28,6 +30,25 @@ namespace
             *x += 360.0f;
         return;
     }
+}
+
+bool slave_elec_offset_set_deg(float32_t offset_deg)
+{
+    // The firmware uses -ffast-math, so do not rely on std::isfinite here.
+    uint32_t bits = 0;
+    std::memcpy(&bits, &offset_deg, sizeof(bits));
+    if ((bits & 0x7F800000U) == 0x7F800000U || offset_deg < -360.0f ||
+        offset_deg > 360.0f)
+        return false;
+    // Normalize to [-180, 180] so stored values stay comparable.
+    wrap_m360_360_f32(&offset_deg);
+    slave_elec_offset_deg = offset_deg;
+    return true;
+}
+
+float32_t slave_elec_offset_get_deg(void)
+{
+    return slave_elec_offset_deg;
 }
 
 void initializePosition(position_instance_f32_t *s, uint8_t polepairs,

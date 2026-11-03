@@ -22,6 +22,7 @@ constexpr uint32_t MODE_SET_VELOCITY_KP = 0x20;
 constexpr uint32_t MODE_SET_VELOCITY_KI = 0x21;
 constexpr uint32_t MODE_SET_POSITION_KP = 0x22;
 constexpr uint32_t MODE_SET_POSITION_KD = 0x23;
+constexpr uint32_t MODE_SET_ELEC_OFFSET = 0x24; // Slave electrical offset [deg].
 constexpr uint32_t MODE_COGGING_COMPENSATION = 0x30;
 constexpr uint32_t MODE_COGGING_TOGGLE = 0x31;
 constexpr uint32_t MODE_CAN_BROADCAST_TOGGLE = 0xF0;

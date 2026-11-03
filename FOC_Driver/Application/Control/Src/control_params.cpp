@@ -3,6 +3,7 @@
 #include "flash_memory.hpp"
 #include "low_speed_loop.hpp"
 #include "memory_constants.hpp"
+#include "position.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -10,6 +11,7 @@
 namespace {
 constexpr uint32_t CONTROL_PARAM_MAGIC = 0x4350524Du;
 constexpr uint32_t POSITION_PARAM_MAGIC = 0x50504431u; // "PPD1" extension.
+constexpr uint32_t ELEC_OFFSET_MAGIC = 0x454F4631u;    // "EOF1" extension.
 constexpr uint16_t BROADCAST_RATE_MIN_HZ = 1;
 constexpr uint16_t BROADCAST_RATE_MAX_HZ = 1000;
 
@@ -24,12 +26,17 @@ struct __attribute__((packed, aligned(8))) ControlParamBlock_t {
   uint32_t position_magic;
   float32_t kp_pos;
   float32_t kd_pos;
+  // Former reserved word; old firmware left it 0xFFFFFFFF.
+  uint32_t elec_offset_magic;
+  float32_t slave_elec_offset_deg;
   uint32_t reserved;
 };
 static_assert(offsetof(ControlParamBlock_t, position_magic) == 24,
               "Legacy control parameter layout must not change");
-static_assert(sizeof(ControlParamBlock_t) == 40,
-              "ControlParamBlock_t must be 40 bytes");
+static_assert(offsetof(ControlParamBlock_t, elec_offset_magic) == 36,
+              "Position extension layout must not change");
+static_assert(sizeof(ControlParamBlock_t) == 48,
+              "ControlParamBlock_t must be 48 bytes");
 
 uint16_t s_can_broadcast_rate_hz = BROADCAST_RATE_MAX_HZ;
 
@@ -71,6 +78,10 @@ bool load_control_params_from_flash(void) {
     position_loop_set_kp(block.kp_pos);
     position_loop_set_kd(block.kd_pos);
   }
+  // Same rule for the electrical offset; the setter rejects NaN/out of range.
+  if (block.elec_offset_magic == ELEC_OFFSET_MAGIC) {
+    slave_elec_offset_set_deg(block.slave_elec_offset_deg);
+  }
   return true;
 }
 
@@ -86,6 +97,7 @@ bool save_control_params_to_flash(void) {
                                current_loop_get_cutoff_freq(), kp_vel, ki_vel,
                                s_can_broadcast_rate_hz, 0xFFFFFFFFu,
                                POSITION_PARAM_MAGIC, kp_pos, kd_pos,
+                               ELEC_OFFSET_MAGIC, slave_elec_offset_get_deg(),
                                0xFFFFFFFFu};
 
   uint32_t status =
