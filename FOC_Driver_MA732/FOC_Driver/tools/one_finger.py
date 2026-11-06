@@ -7,8 +7,9 @@
 - CAN 쪽(연결, 위치 제어, 게인, Smoothing, Soft start, Initialize)은 position_control_app.py와 같다.
 - ROM 보호: CAN 관절의 현재/명령 위치가 ROM 끝 근처(ROM_GUARD_DEG)면 Kd를 슬라이더 최대로 올리고,
   벗어나면 원래 Kd로 되돌린다 (구역 안에서 Kd 슬라이더를 직접 바꾸면 복귀하지 않음).
+  ROM Guard 버튼으로 ON/OFF하며 기본값은 ON. OFF 시 자동으로 올린 Kd를 복원한다.
 - MCP F/E 섹션: [DXL 연결] = 포트 open + 상태 수신 스레드 시작, [위치 제어] = Extended Position 모드 토크 ON.
-  Smoothing과 Initialize(영점)는 MCP F/E에도 같이 적용된다.
+  내부 속도/가속도 프로파일로 가감속하며, Smoothing과 Initialize(영점)도 같이 적용된다.
 - 굽힘 평면 뷰: 주황 손끝을 드래그하면 최소 구동 IK로 MCP/PIP/DIP 목표를 정한다.
   같은 손끝 위치를 내는 해 중 현재 목표 관절각에서 가장 적게 움직이는 해를 고른다.
   MCP F/E 위치 제어가 OFF면 MCP는 현재 각(수신 없으면 0)으로 고정하고 PIP/DIP만 푼다.
@@ -57,7 +58,8 @@ DXL_ID = 1                     # 연결된 XM335-T323-T에서 확인한 ID
 DXL_GEAR = 1.0                 # 다이나믹셀 축 deg / MCP F/E deg (임시값)
 DXL_SIGN = 1.0                 # 다이나믹셀 + 방향 = MCP 굽힘(+X)이면 1.0, 반대면 -1.0
 DXL_ZERO_DEG = 0.0             # MCP F/E = 0일 때 다이나믹셀 위치 [deg]. Initialize가 실행 중 다시 잡는다.
-DXL_PROFILE_VELOCITY = 0       # Profile Velocity [0.229 rpm], 0 = 제한 없음 (기울기 제한은 Smoothing)
+DXL_PROFILE_VELOCITY = 45      # 단위 0.229 rpm, 45 ≈ 61.8 deg/s (다이나믹셀 축)
+DXL_PROFILE_ACCELERATION = 15  # 단위 214.577 rev/min², 15 ≈ 321.9 deg/s² (다이나믹셀 축)
 DXL_PERIOD_S = 0.02            # 다이나믹셀 읽기/쓰기 주기 (50 Hz)
 DXL_LOG_S = 1.0                # 통신 오류 로그 최소 간격 [s]
 
@@ -207,12 +209,15 @@ def workspace_lines():
 # 3. 다이나믹셀 (MCP F/E): 통신 스레드 + 섹션 위젯
 # =====================================================================
 DXL_POS_PER_DEG = 4096 / 360.0
+DXL_ADDR_DRIVE_MODE = 10
 DXL_ADDR_OPERATING_MODE = 11
 DXL_ADDR_TORQUE_ENABLE = 64
+DXL_ADDR_PROFILE_ACCELERATION = 108
 DXL_ADDR_PROFILE_VELOCITY = 112
 DXL_ADDR_GOAL_POSITION = 116
 DXL_ADDR_PRESENT_POSITION = 132
 DXL_MODE_EXT_POSITION = 4
+DXL_DRIVE_TIME_BASED_PROFILE = 0x04
 
 
 class DxlError(RuntimeError):
@@ -333,6 +338,12 @@ class DxlWorker(threading.Thread):
                 dxl.torque(i, False)  # 모드는 토크 OFF에서만 바꿀 수 있다 (EEPROM이라 다를 때만 쓴다)
                 if dxl.r1(i, DXL_ADDR_OPERATING_MODE) != DXL_MODE_EXT_POSITION:
                     dxl.w1(i, DXL_ADDR_OPERATING_MODE, DXL_MODE_EXT_POSITION)
+                # 시간 기반 비트만 해제해 속도 기반 프로파일을 선택하고 회전 방향 등은 보존한다.
+                drive_mode = dxl.r1(i, DXL_ADDR_DRIVE_MODE)
+                if drive_mode & DXL_DRIVE_TIME_BASED_PROFILE:
+                    dxl.w1(i, DXL_ADDR_DRIVE_MODE, drive_mode & ~DXL_DRIVE_TIME_BASED_PROFILE)
+                # Operating Mode 변경 시 프로파일 값이 초기화되므로 모드 설정 뒤에 적용한다.
+                dxl.w4(i, DXL_ADDR_PROFILE_ACCELERATION, DXL_PROFILE_ACCELERATION)
                 dxl.w4(i, DXL_ADDR_PROFILE_VELOCITY, DXL_PROFILE_VELOCITY)
                 if goal is None:
                     goal = dxl_signed32(dxl.r4(i, DXL_ADDR_PRESENT_POSITION))
@@ -706,6 +717,15 @@ class OneFingerApp(PositionControlApp):
         left = find_layout(self.centralWidget().layout(), self.sections[AA_SECTION])
         left.insertWidget(left.indexOf(self.sections[AA_SECTION]) + 1, self.mcp)
 
+        self.btn_kd_guard = QtWidgets.QPushButton("ROM Guard ON")
+        self.btn_kd_guard.setCheckable(True)
+        self.btn_kd_guard.setChecked(True)
+        self.btn_kd_guard.setToolTip("CAN 관절(MCP A/A, PIP, DIP)의 상·하한 근처에서 Kd 자동 증가. "
+                                     "OFF 시 자동으로 올린 Kd를 복원하며 수동 변경값은 유지합니다.")
+        self.btn_kd_guard.toggled.connect(self._on_kd_guard)
+        header = find_layout(self.centralWidget().layout(), self.btn_cogging)
+        header.insertWidget(header.indexOf(self.btn_cogging) + 1, self.btn_kd_guard)
+
     def _build_finger(self):
         self.finger = PlaneView()
         self.finger.tip_dragged.connect(self._on_tip_drag)
@@ -767,11 +787,25 @@ class OneFingerApp(PositionControlApp):
         super()._ramp()
         self._update_kd_guard()
 
+    def _on_kd_guard(self, checked):
+        self.btn_kd_guard.setText("ROM Guard ON" if checked else "ROM Guard OFF")
+        if checked:
+            self._update_kd_guard()
+        else:
+            for sec, saved in self.kd_guard.items():
+                # 마지막 주기 이후 사용자가 바꾼 값이나 조작 중인 슬라이더도 덮어쓰지 않는다.
+                if saved is not None and not sec.sld_kd.isSliderDown() and sec.sld_kd.value() == GAIN_STEPS:
+                    self._set_kd_slider(sec, saved)
+            self.kd_guard.clear()
+        self._log(f"ROM Guard {'ON' if checked else 'OFF'}")
+
     def _update_kd_guard(self):
         """현재 위치나 명령 위치가 ROM 끝 ROM_GUARD_DEG 안이면 Kd 슬라이더를 최대로 올리고,
         구역을 벗어나면 원래 값으로 되돌린다. 구역 안에서 사용자가 Kd 슬라이더를 만지면
         그 값을 존중하고 복귀하지 않는다. 경계 떨림을 막기 위해 나갈 때는 ROM_GUARD_HYST_DEG만큼 더 벗어나야 한다.
         """
+        if not self.btn_kd_guard.isChecked():
+            return
         for index, band in ROM_GUARD_DEG.items():
             sec = self.sections[index]
             guarded = sec in self.kd_guard
