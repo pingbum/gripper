@@ -2,9 +2,11 @@
 """
 손가락 한 개 위치 제어 GUI - 관절 4개 (position_control_app.py 확장, 3D_app.py 기반).
 
-- 관절: MCP A/A = Channel 0 (CAN), MCP F/E = 다이나믹셀 (UART, ../dxl_jetson.py),
+- 관절: MCP A/A = Channel 0 (CAN), MCP F/E = 다이나믹셀 (U2D2 USB, DYNAMIXEL SDK),
         PIP F/E = Channel 1 + 2 (CAN), DIP F/E = Channel 3 (CAN).
 - CAN 쪽(연결, 위치 제어, 게인, Smoothing, Soft start, Initialize)은 position_control_app.py와 같다.
+- ROM 보호: CAN 관절의 현재/명령 위치가 ROM 끝 근처(ROM_GUARD_DEG)면 Kd를 슬라이더 최대로 올리고,
+  벗어나면 원래 Kd로 되돌린다 (구역 안에서 Kd 슬라이더를 직접 바꾸면 복귀하지 않음).
 - MCP F/E 섹션: [DXL 연결] = 포트 open + 상태 수신 스레드 시작, [위치 제어] = Extended Position 모드 토크 ON.
   Smoothing과 Initialize(영점)는 MCP F/E에도 같이 적용된다.
 - 굽힘 평면 뷰: 주황 손끝을 드래그하면 최소 구동 IK로 MCP/PIP/DIP 목표를 정한다.
@@ -14,9 +16,10 @@
 
 실행: python3 one_finger.py
 """
+import fcntl
 import math
-import os
 import sys
+import termios
 import threading
 import time
 from functools import lru_cache
@@ -39,16 +42,18 @@ AA_SIGN = 1.0                  # A/A + 방향 = 손가락이 +Z(화면 밖)로 �
 JOINT_NAMES = {AA_SECTION: "MCP A/A", FINGER_SECTIONS[0]: "PIP F/E", FINGER_SECTIONS[1]: "DIP F/E"}
 
 # 섹션별 게인 슬라이더 최대값 (Kp [A/deg], Kd [A·s/deg]). 시작 위치 = 최대값 * GAIN_INIT_RATIO
-GAIN_MAX = {AA_SECTION: (0.005, 0.001), FINGER_SECTIONS[0]: (0.01, 0.0005), FINGER_SECTIONS[1]: (0.005, 0.0005)}
+GAIN_MAX = {AA_SECTION: (0.005, 0.0005), FINGER_SECTIONS[0]: (0.01, 0.0005), FINGER_SECTIONS[1]: (0.005, 0.0005)}
 GAIN_INIT_RATIO = 0.2
+# ROM 보호: 현재/명령 위치가 위치 제약 끝에서 이 범위 [deg] 안이면 Kd를 슬라이더 최대값으로 올린다.
+# (A/A: -17~-13, 13~17 deg / PIP, DIP: 0~10, 80~90 deg). 나갈 때는 ROM_GUARD_HYST_DEG만큼 더 벗어나야 복귀.
+ROM_GUARD_DEG = {AA_SECTION: 4.0, FINGER_SECTIONS[0]: 10.0, FINGER_SECTIONS[1]: 10.0}
+ROM_GUARD_HYST_DEG = 0.5
 MCP_FE_LIMITS = (0.0, 90.0)    # MCP F/E 위치 제약 [deg] (임시값, 하드웨어 확인 필요)
 
-# 다이나믹셀 (MCP F/E). 포트/핀 기본값은 dxl_jetson.py와 같다.
-DXL_PORT = "/dev/ttyTHS1"
-DXL_BAUD = 57600
-DXL_DIR_PIN = 7                # TX_EN 방향제어 40핀 번호 (BOARD)
-DXL_DIR_INVERT = False
-DXL_ID = 1                     # (임시값, `python3 dxl_jetson.py scan`으로 확인)
+# 다이나믹셀 (MCP F/E): U2D2가 송수신 방향을 자동 제어하므로 Jetson GPIO는 사용하지 않는다.
+DXL_PORT = "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTBIN7BJ-if00-port0"
+DXL_BAUD = 1_000_000
+DXL_ID = 1                     # 연결된 XM335-T323-T에서 확인한 ID
 DXL_GEAR = 1.0                 # 다이나믹셀 축 deg / MCP F/E deg (임시값)
 DXL_SIGN = 1.0                 # 다이나믹셀 + 방향 = MCP 굽힘(+X)이면 1.0, 반대면 -1.0
 DXL_ZERO_DEG = 0.0             # MCP F/E = 0일 때 다이나믹셀 위치 [deg]. Initialize가 실행 중 다시 잡는다.
@@ -201,21 +206,107 @@ def workspace_lines():
 # =====================================================================
 # 3. 다이나믹셀 (MCP F/E): 통신 스레드 + 섹션 위젯
 # =====================================================================
+DXL_POS_PER_DEG = 4096 / 360.0
+DXL_ADDR_OPERATING_MODE = 11
+DXL_ADDR_TORQUE_ENABLE = 64
+DXL_ADDR_PROFILE_VELOCITY = 112
+DXL_ADDR_GOAL_POSITION = 116
+DXL_ADDR_PRESENT_POSITION = 132
+DXL_MODE_EXT_POSITION = 4
+
+
+class DxlError(RuntimeError):
+    pass
+
+
+def dxl_signed32(value):
+    return value - (1 << 32) if value & 0x80000000 else value
+
+
+class U2D2Dynamixel:
+    """Protocol 2.0 USB 통신. GPIO를 사용하는 dxl_jetson.py와 독립적으로 동작한다."""
+
+    def __init__(self, port, baud, retries=3):
+        # GUI 자체는 SDK가 없어도 열 수 있게 연결할 때만 import한다.
+        from dynamixel_sdk import COMM_SUCCESS, PacketHandler, PortHandler
+
+        self.port_name, self.baud = port, baud
+        self.retries, self.comm_success = retries, COMM_SUCCESS
+        self.port, self.packet = PortHandler(port), PacketHandler(2.0)
+        self._exclusive = False
+        try:
+            if not self.port.openPort():
+                raise DxlError("포트 열기 실패")
+            if not self.port.setBaudRate(baud):
+                raise DxlError(f"보드레이트 설정 실패: {baud}")
+            # SDK의 setBaudRate가 포트를 다시 열므로 최종 핸들에 독점 접근을 설정한다.
+            fcntl.ioctl(self.port.ser.fileno(), termios.TIOCEXCL)
+            self._exclusive = True
+        except Exception as exc:
+            self.close()
+            raise DxlError(f"U2D2 포트 열기 실패: {port} ({exc})") from exc
+
+    def close(self):
+        if self.port.is_open:
+            if self._exclusive:
+                try:
+                    fcntl.ioctl(self.port.ser.fileno(), termios.TIOCNXCL)
+                except OSError:
+                    pass  # USB가 분리됐어도 핸들은 닫는다.
+                self._exclusive = False
+            self.port.closePort()
+
+    def _call(self, fn, what, *args):
+        last = ""
+        for attempt in range(self.retries):
+            try:
+                result = fn(self.port, *args)
+            except OSError as exc:
+                self.port.is_using = False  # SDK는 시리얼 예외 시 통신 중 플래그를 해제하지 않는다.
+                raise DxlError(f"{what}: {exc} ({self.port_name})") from exc
+            value, comm, error = result if len(result) == 3 else (None, *result)
+            if comm == self.comm_success:
+                if error:
+                    raise DxlError(f"{what}: {self.packet.getRxPacketError(error)}")
+                return value
+            last = self.packet.getTxRxResult(comm)
+            if attempt + 1 < self.retries:
+                time.sleep(0.005)
+        raise DxlError(f"{what}: {last} ({self.port_name}, {self.baud} bps)")
+
+    def ping(self, dxl_id):
+        return self._call(self.packet.ping, f"ping ID {dxl_id}", dxl_id)
+
+    def r1(self, i, a):
+        return self._call(self.packet.read1ByteTxRx, f"read1 ID {i}@{a}", i, a)
+
+    def r2(self, i, a):
+        return self._call(self.packet.read2ByteTxRx, f"read2 ID {i}@{a}", i, a)
+
+    def r4(self, i, a):
+        return self._call(self.packet.read4ByteTxRx, f"read4 ID {i}@{a}", i, a)
+
+    def w1(self, i, a, v):
+        self._call(self.packet.write1ByteTxRx, f"write1 ID {i}@{a}", i, a, v)
+
+    def w4(self, i, a, v):
+        self._call(self.packet.write4ByteTxRx, f"write4 ID {i}@{a}", i, a, v & 0xFFFFFFFF)
+
+    def torque(self, dxl_id, on):
+        self.w1(dxl_id, DXL_ADDR_TORQUE_ENABLE, int(on))
+
+
 def open_dynamixel():
-    """../dxl_jetson.py의 Dynamixel을 연다 (Jetson.GPIO가 필요해 연결할 때만 import)."""
-    parent = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
-    if parent not in sys.path:
-        sys.path.insert(0, parent)
-    import dxl_jetson
-    return dxl_jetson, dxl_jetson.Dynamixel(DXL_PORT, DXL_BAUD, DXL_DIR_PIN, DXL_DIR_INVERT)
+    """현재 연결된 U2D2를 연다. 모드/위치/토크는 변경하지 않는다."""
+    return U2D2Dynamixel(DXL_PORT, DXL_BAUD)
 
 
 class DxlWorker(threading.Thread):
     """DXL_PERIOD_S마다 요청된 토크/목표를 반영하고 현재 위치를 읽는다. 포트는 이 스레드만 쓴다."""
 
-    def __init__(self, module, dxl, dxl_id):
+    def __init__(self, dxl, dxl_id):
         super().__init__(daemon=True)
-        self.m, self.dxl, self.id = module, dxl, dxl_id
+        self.dxl, self.id = dxl, dxl_id
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
         self.torque = False   # 요청: 토크 ON/OFF
@@ -236,23 +327,23 @@ class DxlWorker(threading.Thread):
         return errors
 
     def _apply(self, torque, goal):
-        m, dxl, i = self.m, self.dxl, self.id
+        dxl, i = self.dxl, self.id
         if torque != self._torque_on:
             if torque:
                 dxl.torque(i, False)  # 모드는 토크 OFF에서만 바꿀 수 있다 (EEPROM이라 다를 때만 쓴다)
-                if dxl.r1(i, m.ADDR_OPERATING_MODE) != m.MODE_EXT_POSITION:
-                    dxl.w1(i, m.ADDR_OPERATING_MODE, m.MODE_EXT_POSITION)
-                dxl.w4(i, m.ADDR_PROFILE_VELOCITY, DXL_PROFILE_VELOCITY)
+                if dxl.r1(i, DXL_ADDR_OPERATING_MODE) != DXL_MODE_EXT_POSITION:
+                    dxl.w1(i, DXL_ADDR_OPERATING_MODE, DXL_MODE_EXT_POSITION)
+                dxl.w4(i, DXL_ADDR_PROFILE_VELOCITY, DXL_PROFILE_VELOCITY)
                 if goal is None:
-                    goal = m.to_signed32(dxl.r4(i, m.ADDR_PRESENT_POSITION))
-                dxl.w4(i, m.ADDR_GOAL_POSITION, goal)
+                    goal = dxl_signed32(dxl.r4(i, DXL_ADDR_PRESENT_POSITION))
+                dxl.w4(i, DXL_ADDR_GOAL_POSITION, goal)
                 dxl.torque(i, True)
                 self._goal_sent = goal
             else:
                 dxl.torque(i, False)
             self._torque_on = torque
         elif torque and goal is not None and goal != self._goal_sent:
-            dxl.w4(i, m.ADDR_GOAL_POSITION, goal)
+            dxl.w4(i, DXL_ADDR_GOAL_POSITION, goal)
             self._goal_sent = goal
 
     def run(self):
@@ -262,16 +353,16 @@ class DxlWorker(threading.Thread):
                 torque, goal = self.torque, self.goal
             try:
                 self._apply(torque, goal)
-                raw = self.m.to_signed32(self.dxl.r4(self.id, self.m.ADDR_PRESENT_POSITION))
+                raw = dxl_signed32(self.dxl.r4(self.id, DXL_ADDR_PRESENT_POSITION))
                 with self.lock:
                     self.sample = (time.monotonic(), raw)
-            except self.m.DxlError as exc:
+            except DxlError as exc:
                 with self.lock:
                     self.errors.append(str(exc))
             self.stop_event.wait(max(0.0, DXL_PERIOD_S - (time.monotonic() - start)))
         try:
             self.dxl.torque(self.id, False)
-        except self.m.DxlError:
+        except DxlError:
             pass
 
 
@@ -586,11 +677,12 @@ class OneFingerApp(PositionControlApp):
     SECTION_LIMITS = {AA_SECTION: AA_LIMITS}
 
     def __init__(self):
-        self.dxl, self.dxl_module, self.dxl_worker = None, None, None
+        self.dxl, self.dxl_worker = None, None
         self.dxl_zero = DXL_ZERO_DEG  # MCP F/E = 0인 다이나믹셀 위치 [deg]
         self.dxl_errors = 0           # 연결 후 누적 통신 오류 수
         self.dxl_pending = []         # 아직 로그에 안 남긴 통신 오류
         self.dxl_log_time = 0.0
+        self.kd_guard = {}            # ROM 보호 중인 섹션 -> 복귀할 Kd 슬라이더 값 (None = 사용자 변경, 복귀 안 함)
         super().__init__()
         self.setWindowTitle("One Finger Control")
         self.resize(1750, 940)
@@ -645,10 +737,10 @@ class OneFingerApp(PositionControlApp):
         return sample
 
     def _raw_to_deg(self, raw):
-        return DXL_SIGN * (raw / self.dxl_module.POS_PER_DEG - self.dxl_zero) / DXL_GEAR
+        return DXL_SIGN * (raw / DXL_POS_PER_DEG - self.dxl_zero) / DXL_GEAR
 
     def _deg_to_raw(self, deg):
-        return round((self.dxl_zero + DXL_SIGN * deg * DXL_GEAR) * self.dxl_module.POS_PER_DEG)
+        return round((self.dxl_zero + DXL_SIGN * deg * DXL_GEAR) * DXL_POS_PER_DEG)
 
     # ------------- 명령: MCP F/E는 다이나믹셀로 보낸다 -------------
     def _command(self, sec, deg):
@@ -670,23 +762,68 @@ class OneFingerApp(PositionControlApp):
         if error != 0.0:
             self._command(self.mcp, cmd + clamp(error, -max_step, max_step))
 
+    # ------------- ROM 보호: 위치 제약 끝 근처에서 Kd 최대 -------------
+    def _ramp(self):
+        super()._ramp()
+        self._update_kd_guard()
+
+    def _update_kd_guard(self):
+        """현재 위치나 명령 위치가 ROM 끝 ROM_GUARD_DEG 안이면 Kd 슬라이더를 최대로 올리고,
+        구역을 벗어나면 원래 값으로 되돌린다. 구역 안에서 사용자가 Kd 슬라이더를 만지면
+        그 값을 존중하고 복귀하지 않는다. 경계 떨림을 막기 위해 나갈 때는 ROM_GUARD_HYST_DEG만큼 더 벗어나야 한다.
+        """
+        for index, band in ROM_GUARD_DEG.items():
+            sec = self.sections[index]
+            guarded = sec in self.kd_guard
+            positions = []
+            if sec.cb_control.isChecked():
+                positions = [p for p in (self._section_deg(sec, sec.active_ids), self.cmd.get(sec))
+                             if p is not None]
+            margin = band + ROM_GUARD_HYST_DEG if guarded else band
+            near = any(p <= sec.low + margin or p >= sec.high - margin for p in positions)
+
+            if near and not guarded:
+                if sec.sld_kd.isSliderDown():  # 사용자가 조작 중이면 건드리지 않는다
+                    self.kd_guard[sec] = None
+                    continue
+                self.kd_guard[sec] = sec.sld_kd.value()
+                self._set_kd_slider(sec, GAIN_STEPS)
+                self._log(f"{sec.name}: ROM 끝 {band:g} deg 이내 → Kd 최대 {sec.kd:.6f}")
+            elif near and self.kd_guard[sec] is not None:
+                if sec.sld_kd.isSliderDown() or sec.sld_kd.value() != GAIN_STEPS:
+                    self.kd_guard[sec] = None  # 사용자가 바꿨으므로 구역을 나가도 복귀하지 않는다
+                    self._log(f"{sec.name}: Kd 수동 변경, ROM 구역을 벗어나도 자동 복귀 안 함")
+            elif not near and guarded:
+                saved = self.kd_guard.pop(sec)
+                if saved is not None and not sec.sld_kd.isSliderDown():
+                    self._set_kd_slider(sec, saved)
+                    self._log(f"{sec.name}: ROM 구역 벗어남 → Kd 복귀 {sec.kd:.6f}")
+
+    def _set_kd_slider(self, sec, value):
+        """Kd 슬라이더를 프로그램이 옮긴다. 위치 제어 중일 때만 게인을 전송한다."""
+        sec.sld_kd.blockSignals(True)
+        sec.sld_kd.setValue(value)
+        sec.sld_kd.blockSignals(False)
+        sec._update_labels()
+        if sec.cb_control.isChecked():
+            self._on_gains_changed(sec)  # 소프트 스타트 중이면 램프가 슬라이더 값을 읽어 반영한다
+
     # ------------- MCP F/E 입력 처리 -------------
     def _on_mcp_connect(self, checked):
         if checked:
             try:
-                self.dxl_module, self.dxl = open_dynamixel()
-                if self.dxl.ping(DXL_ID) is None:
-                    raise RuntimeError(f"ID {DXL_ID} 응답 없음 (DXL_ID/보드레이트/배선 확인)")
+                self.dxl = open_dynamixel()
+                model = self.dxl.ping(DXL_ID)
             except Exception as exc:
                 self._log(f"MCP F/E: 다이나믹셀 연결 실패: {exc}")
                 self._close_dxl()
                 self.mcp.force_off(self.mcp.cb_connect)
                 return
             self.dxl_errors, self.dxl_pending = 0, []
-            self.dxl_worker = DxlWorker(self.dxl_module, self.dxl, DXL_ID)
+            self.dxl_worker = DxlWorker(self.dxl, DXL_ID)
             self.dxl_worker.start()
             self.mcp.set_connected(True)
-            self._log(f"MCP F/E: 다이나믹셀 연결 ({DXL_PORT}, {DXL_BAUD} bps, ID {DXL_ID}), 위치 제어 OFF")
+            self._log(f"MCP F/E: U2D2 연결 ({DXL_PORT}, {DXL_BAUD} bps, ID {DXL_ID}, model {model}), 위치 제어 OFF")
             return
         if self.mcp.cb_control.isChecked():
             self.mcp.cb_control.setChecked(False)  # → _on_mcp_control: 토크 OFF
@@ -697,7 +834,7 @@ class OneFingerApp(PositionControlApp):
     def _close_dxl(self):
         if self.dxl_worker is not None:
             self.dxl_worker.stop_event.set()  # 스레드가 끝나면서 토크 OFF
-            self.dxl_worker.join(timeout=1.0)
+            self.dxl_worker.join()  # 진행 중인 SDK 통신이 끝난 뒤 포트를 닫는다.
             self.dxl_worker = None
         if self.dxl is not None:
             self.dxl.close()
@@ -745,7 +882,7 @@ class OneFingerApp(PositionControlApp):
         if sample is None:
             self._log("MCP F/E: 상태 수신 없음, 영점 설정 생략")
             return
-        self.dxl_zero = sample[1] / self.dxl_module.POS_PER_DEG
+        self.dxl_zero = sample[1] / DXL_POS_PER_DEG
         if self.mcp.cb_control.isChecked():
             self.mcp.set_ref(0.0)
             self._command(self.mcp, 0.0)  # 새 영점 = 현재 위치이므로 제자리 유지
