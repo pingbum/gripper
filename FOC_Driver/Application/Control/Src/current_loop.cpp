@@ -16,8 +16,12 @@ uint32_t data[3];
 // DSP buffers must be 32-byte aligned for best throughput.
 static float32_t current_sen[ADC_BUF_SIZE] __attribute__((aligned(32)));
 
-float32_t cutoff_freq_cur = 1800.0f;   // Hz
+float32_t cutoff_freq_cur = 1200.0f;   // Hz
 float32_t control_freq_cur = 50000.0f; // Control loop frequency in Hz
+
+// Ramp the current-loop voltage limit from zero on each initialization.
+static uint32_t soft_start_cycle = 0U;
+constexpr uint32_t SOFT_START_CYCLES = 10000U; // 50 kHz x 200 ms.
 
 float32_t Kp_d = 0.0f;
 float32_t Kp_q = 0.0f;
@@ -83,6 +87,7 @@ void current_loop_init() {
   // Initialize control blocks.
   update_current_gains();
   apply_current_gains(true);
+  soft_start_cycle = 0U;
 }
 
 void current_loop_set_cutoff_freq(float32_t cutoff_hz) {
@@ -129,6 +134,19 @@ void current_loop(position_instance_f32_t *pInst, float32_t ref_i) {
   i_error.d = i_ref.d - i_dq_sen.d; // d-axis current error.
   i_error.q = i_ref.q - i_dq_sen.q; // q-axis current error.
 
+  // Limit integrators before PI evaluation; changing gains during startup may
+  // restore full bounds, so reapply the ramp limit on every startup iteration.
+  float32_t v_lim = VOLTAGE_MAX;
+  if (soft_start_cycle < SOFT_START_CYCLES) {
+    v_lim = VOLTAGE_MAX * static_cast<float32_t>(soft_start_cycle++) /
+            static_cast<float32_t>(SOFT_START_CYCLES);
+    id_control.upper_bound = iq_control.upper_bound = v_lim;
+    id_control.lower_bound = iq_control.lower_bound = -v_lim;
+  } else if (soft_start_cycle == SOFT_START_CYCLES) {
+    apply_current_gains(false); // Restore full bounds once, retaining PI state.
+    ++soft_start_cycle;
+  }
+
   // PI control.
   v_command.d = control_f32(&id_control, i_error.d);
   v_command.q = control_f32(&iq_control, i_error.q);
@@ -142,6 +160,12 @@ void current_loop(position_instance_f32_t *pInst, float32_t ref_i) {
   // Feedforward
   v_command.d = v_command.d + v_cross.d;
   v_command.q = v_command.q + v_cross.q; // TODO : + back-EMF term
+
+  // Include the P and cross-coupling terms in the startup output limit.
+  if (v_lim < VOLTAGE_MAX) {
+    v_command.d = clamp_f32(v_command.d, -v_lim, v_lim);
+    v_command.q = clamp_f32(v_command.q, -v_lim, v_lim);
+  }
 
   // 3) Inverse Park transform.
   park_inv_f32(&v_command, &v_SVM, s, c);

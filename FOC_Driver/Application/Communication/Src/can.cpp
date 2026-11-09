@@ -250,6 +250,13 @@ static void handle_rx_message(const FDCAN_RxHeaderTypeDef &rxh,
       velocity_loop_get_gains(&kp, &ki);
       f32_to_be32(base_mode == MODE_SET_VELOCITY_KP ? kp : ki, payload);
       length = 4;
+    } else if (base_mode == MODE_SET_POSITION_KP ||
+               base_mode == MODE_SET_POSITION_KD) {
+      float32_t kp = 0.0f;
+      float32_t kd = 0.0f;
+      position_loop_get_gains(&kp, &kd);
+      f32_to_be32(base_mode == MODE_SET_POSITION_KP ? kp : kd, payload);
+      length = 4;
     } else {
       return;
     }
@@ -285,7 +292,8 @@ static void handle_rx_message(const FDCAN_RxHeaderTypeDef &rxh,
   }
 
   if (mode_id == MODE_SET_CURRENT_BANDWITDH ||
-      mode_id == MODE_SET_VELOCITY_KP || mode_id == MODE_SET_VELOCITY_KI) {
+      mode_id == MODE_SET_VELOCITY_KP || mode_id == MODE_SET_VELOCITY_KI ||
+      mode_id == MODE_SET_POSITION_KP || mode_id == MODE_SET_POSITION_KD) {
     float32_t value = 0.0f;
     if (!parse_be_f32_payload(rxh, data, &value))
       return;
@@ -293,8 +301,12 @@ static void handle_rx_message(const FDCAN_RxHeaderTypeDef &rxh,
       current_loop_set_cutoff_freq(value);
     } else if (mode_id == MODE_SET_VELOCITY_KP) {
       velocity_loop_set_kp(value);
-    } else {
+    } else if (mode_id == MODE_SET_VELOCITY_KI) {
       velocity_loop_set_ki(value);
+    } else if (mode_id == MODE_SET_POSITION_KP) {
+      position_loop_set_kp(value);
+    } else {
+      position_loop_set_kd(value);
     }
     return;
   }

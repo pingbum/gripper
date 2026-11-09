@@ -20,6 +20,8 @@ constexpr uint32_t MODE_SAVE_CTRL_PARAMS = 0x10;
 constexpr uint32_t MODE_SET_CURRENT_BANDWITDH = 0x11;
 constexpr uint32_t MODE_SET_VELOCITY_KP = 0x20;
 constexpr uint32_t MODE_SET_VELOCITY_KI = 0x21;
+constexpr uint32_t MODE_SET_POSITION_KP = 0x22;
+constexpr uint32_t MODE_SET_POSITION_KD = 0x23;
 constexpr uint32_t MODE_COGGING_COMPENSATION = 0x30;
 constexpr uint32_t MODE_COGGING_TOGGLE = 0x31;
 constexpr uint32_t MODE_CAN_BROADCAST_TOGGLE = 0xF0;
@@ -54,7 +56,7 @@ constexpr float32_t V_DC = 12;              // DC link voltage [V].
 
 // Controller limits.
 constexpr float32_t VOLTAGE_MAX = V_DC; // Max voltage command [V].
-constexpr float32_t CURRENT_MAX = 0.8f; // Max current magnitude [A]..
+constexpr float32_t CURRENT_MAX = 1.2f; // Max current magnitude [A]..
 
 // Conversions.
 constexpr float32_t RPM_TO_DEG_PER_SEC = 6.0f;

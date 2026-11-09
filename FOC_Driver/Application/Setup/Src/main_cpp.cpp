@@ -46,7 +46,7 @@ volatile float32_t cogging_lut_debug[CoggingCompensation::BIN_COUNT] = {};
 
 namespace {
 CoggingCompensation cogging;
-bool cogging_compensation_is_enabled = true;
+bool cogging_compensation_is_enabled = false; // Enable explicitly through CAN.
 
 constexpr uint32_t COGGING_LUT_MAGIC = 0x434F4747UL; // "COGG"
 constexpr uint32_t COGGING_LUT_VERSION = 1UL;

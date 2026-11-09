@@ -4,6 +4,8 @@
 #include "control_block.hpp"
 #include "motor_control.hpp" // For dq_t
 #include "stm32g4xx_hal_hrtim.h"
+#include <cstdint>
+#include <cstring>
 
 // PI controller for the velocity loop.
 static control_instance_f32_t velocity_control;
@@ -30,6 +32,13 @@ static void apply_velocity_gains(bool reset_state) {
 static void apply_position_gains(bool reset_state) {
   control_init_f32(&position_control, Kp_pos, 0.00000f, Kd_pos,
                    -CURRENT_MAX, CURRENT_MAX, reset_state ? 1 : 0);
+}
+
+static bool is_valid_position_gain(float32_t gain) {
+  // The firmware uses -ffast-math, so do not rely on std::isfinite here.
+  uint32_t bits = 0;
+  std::memcpy(&bits, &gain, sizeof(bits));
+  return (bits & 0x7F800000U) != 0x7F800000U && gain >= 0.0f;
 }
 
 /**
@@ -111,4 +120,25 @@ void velocity_loop_get_gains(float32_t *kp, float32_t *ki) {
     *kp = Kp_vel;
   if (ki)
     *ki = Ki_vel;
+}
+
+void position_loop_set_kp(float32_t kp) {
+  if (!is_valid_position_gain(kp))
+    return;
+  Kp_pos = kp;
+  apply_position_gains(false);
+}
+
+void position_loop_set_kd(float32_t kd) {
+  if (!is_valid_position_gain(kd))
+    return;
+  Kd_pos = kd;
+  apply_position_gains(false);
+}
+
+void position_loop_get_gains(float32_t *kp, float32_t *kd) {
+  if (kp)
+    *kp = Kp_pos;
+  if (kd)
+    *kd = Kd_pos;
 }
