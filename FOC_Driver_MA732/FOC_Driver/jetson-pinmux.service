@@ -1,0 +1,10 @@
+[Unit]
+Description=Enable 40-pin header Pin 7 as GPIO output (DYNAMIXEL TX_EN)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/jetson_pinmux.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

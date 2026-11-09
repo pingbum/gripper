@@ -43,7 +43,7 @@ AA_SIGN = 1.0                  # A/A + 방향 = 손가락이 +Z(화면 밖)로 �
 JOINT_NAMES = {AA_SECTION: "MCP A/A", FINGER_SECTIONS[0]: "PIP F/E", FINGER_SECTIONS[1]: "DIP F/E"}
 
 # 섹션별 게인 슬라이더 최대값 (Kp [A/deg], Kd [A·s/deg]). 시작 위치 = 최대값 * GAIN_INIT_RATIO
-GAIN_MAX = {AA_SECTION: (0.005, 0.0005), FINGER_SECTIONS[0]: (0.01, 0.0005), FINGER_SECTIONS[1]: (0.005, 0.0005)}
+GAIN_MAX = {AA_SECTION: (0.008, 0.0005), FINGER_SECTIONS[0]: (0.01, 0.0005), FINGER_SECTIONS[1]: (0.005, 0.0005)}
 GAIN_INIT_RATIO = 0.2
 # ROM 보호: 현재/명령 위치가 위치 제약 끝에서 이 범위 [deg] 안이면 Kd를 슬라이더 최대값으로 올린다.
 # (A/A: -17~-13, 13~17 deg / PIP, DIP: 0~10, 80~90 deg). 나갈 때는 ROM_GUARD_HYST_DEG만큼 더 벗어나야 복귀.
