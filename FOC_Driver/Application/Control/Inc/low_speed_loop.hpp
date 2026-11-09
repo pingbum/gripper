@@ -18,6 +18,11 @@ void position_loop_init(void);
  * @return Q-axis current reference.
  */
 float32_t velocity_loop(position_instance_f32_t *pInst, float32_t rpm_ref);
+
+/**
+ * @brief Compute the unclamped position PD current [A], in mechanical sign.
+ * @note Add feedforward/cogging and clamp before publishing the current reference.
+ */
 float32_t position_loop(position_instance_f32_t *pInst, float32_t theta_ref);
 
 /**

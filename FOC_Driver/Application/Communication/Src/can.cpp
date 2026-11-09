@@ -44,6 +44,11 @@ static inline int32_t be32_to_s32(const uint8_t *d) {
   return static_cast<int32_t>(be32_to_u32(d));
 }
 
+static inline int32_t be16_to_s32(const uint8_t *d) {
+  const int32_t raw = (static_cast<int32_t>(d[0]) << 8) | d[1];
+  return (raw & 0x8000) != 0 ? raw - 0x10000 : raw;
+}
+
 static inline float32_t be32_to_f32(const uint8_t *d) {
   uint32_t raw = be32_to_u32(d);
   float32_t value = 0.0f;
@@ -335,8 +340,21 @@ static void handle_rx_message(const FDCAN_RxHeaderTypeDef &rxh,
     state.omega_ref = erpm / (state.position.p); // erpm -> rpm
     state.CONTROL_MODE = MODE_VELOCITY;
   } else if (mode_id == MODE_POSITION) {
-    state.theta_ref = (float32_t)raw * 0.01f;
+    // Exactly 8 bytes: position [0..3] in 0.01 deg, signed i_ff [4..5]
+    // in mA, reserved [6..7] (ignored). Reject old 4-byte position commands.
+    if (rxh.DataLength != FDCAN_DLC_BYTES_8)
+      return;
+    const float32_t theta_ref = static_cast<float32_t>(raw) * 0.01f;
+    const float32_t i_ff = static_cast<float32_t>(be16_to_s32(&data[4])) * 0.001f;
+
+    // Publish the complete command before the higher-priority position IRQ
+    // can observe it. Decode/conversion stay outside this short critical section.
+    const uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    state.theta_ref = theta_ref;
+    state.i_ff = i_ff;
     state.CONTROL_MODE = MODE_POSITION;
+    __set_PRIMASK(primask);
   } else if (mode_id == MODE_CALIBRATION) {
     // Doubleword start address aligned to 8 bytes.
     const uint32_t dw_addr =

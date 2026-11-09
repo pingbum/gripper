@@ -89,20 +89,12 @@ float32_t position_loop(position_instance_f32_t *pInst, float32_t theta_ref) {
       position_control.state.d[1] * alpha
       - position_control.Kd * beta * theta_delta;
 
-  float32_t iq_ref = u_p + u_d;
-
   // state update
   position_control.state.d[1] = u_d;
   position_control.state.d[0] = theta_meas;
 
-  // saturation
-  if (iq_ref > CURRENT_MAX) {
-    return CURRENT_MAX;
-  } else if (iq_ref < -CURRENT_MAX) {
-    return -CURRENT_MAX;
-  } else {
-    return iq_ref;
-  }
+  // The caller adds feedforward/cogging current before the final current limit.
+  return u_p + u_d;
 }
 
 void velocity_loop_set_kp(float32_t kp) {

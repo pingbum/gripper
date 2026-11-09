@@ -411,15 +411,17 @@ void TIM7_PeriodElapsedCB(TIM_HandleTypeDef *htim) {
     break;
   }
   case MODE_POSITION: {
-    state.iq_ref = position_loop(&state.position, state.theta_ref);
+    float32_t iq_command = position_loop(&state.position, state.theta_ref);
     const float32_t cogging_current =
         cogging_compensation_current(state.position.theta_m);
     state.debug = cogging_current;
-    state.iq_ref += cogging_current;
-    if (state.iq_ref > CURRENT_MAX)
-      state.iq_ref = CURRENT_MAX;
-    else if (state.iq_ref < -CURRENT_MAX)
-      state.iq_ref = -CURRENT_MAX;
+    iq_command += state.i_ff + cogging_current;
+    if (iq_command > CURRENT_MAX)
+      iq_command = CURRENT_MAX;
+    else if (iq_command < -CURRENT_MAX)
+      iq_command = -CURRENT_MAX;
+    // The 50 kHz ADC IRQ must only observe the final, limited reference.
+    state.iq_ref = iq_command;
     break;
   }
   default:

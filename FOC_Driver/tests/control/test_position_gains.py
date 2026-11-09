@@ -159,16 +159,14 @@ class PositionGainTests(unittest.TestCase):
         firmware.command(0x23, struct.pack(">f", 0.005))
         self.assertEqual(firmware.cpu.mem_read(state_address, 16), old_state)
 
-    def test_updated_position_gain_drives_output_and_current_limit(self):
+    def test_updated_position_gain_drives_unclamped_pd_output(self):
         firmware = self.firmware
         firmware.command(0x22, struct.pack(">f", 0.1))
         firmware.command(0x23, struct.pack(">f", 0))
         self.assertAlmostEqual(firmware.position_output(0, 1), 0.1)
-        control = firmware.symbols["_ZL16position_control"]
-        limit = struct.unpack("<f", firmware.cpu.mem_read(control + 20, 4))[0]
-        self.assertGreater(limit, 0)
-        self.assertAlmostEqual(firmware.position_output(0, 1000), limit)
-        self.assertAlmostEqual(firmware.position_output(0, -1000), -limit)
+        # TIM7 now adds feedforward/cogging before limiting the final reference.
+        self.assertAlmostEqual(firmware.position_output(0, 1000), 100)
+        self.assertAlmostEqual(firmware.position_output(0, -1000), -100)
         # Multi-turn position is not wrapped to a shortest-path angle.
         self.assertAlmostEqual(firmware.position_output(0, 361, rev=1), 0.1)
 
