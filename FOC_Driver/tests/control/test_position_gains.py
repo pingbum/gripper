@@ -44,7 +44,7 @@ class Firmware:
                     self.cpu.mem_write(segment["p_vaddr"], segment.data())
         self.cpu.reg_write(UC_ARM_REG_C1_C0_2, 0xF << 20)
         self.cpu.reg_write(UC_ARM_REG_FPEXC, 1 << 30)
-        self.cpu.mem_write(PARAM_ADDR, bytes([0xFF]) * 40)
+        self.cpu.mem_write(PARAM_ADDR, bytes([0xFF]) * 48)
         self.tx = []
         self.flash_writes = []
         self.flash_status = 0
@@ -160,16 +160,14 @@ class PositionGainTests(unittest.TestCase):
         firmware.command(0x23, struct.pack(">f", 0.005))
         self.assertEqual(firmware.cpu.mem_read(state_address, 16), old_state)
 
-    def test_updated_position_gain_drives_output_and_current_limit(self):
+    def test_updated_position_gain_drives_unclamped_pd_output(self):
         firmware = self.firmware
         firmware.command(0x22, struct.pack(">f", 0.1))
         firmware.command(0x23, struct.pack(">f", 0))
         self.assertAlmostEqual(firmware.position_output(0, 1), 0.1)
-        control = firmware.symbols["_ZL16position_control"]
-        limit = struct.unpack("<f", firmware.cpu.mem_read(control + 20, 4))[0]
-        self.assertGreater(limit, 0)
-        self.assertAlmostEqual(firmware.position_output(0, 1000), limit)
-        self.assertAlmostEqual(firmware.position_output(0, -1000), -limit)
+        # TIM7 now adds feedforward/cogging before limiting the final reference.
+        self.assertAlmostEqual(firmware.position_output(0, 1000), 100)
+        self.assertAlmostEqual(firmware.position_output(0, -1000), -100)
         # Multi-turn position is not wrapped to a shortest-path angle.
         self.assertAlmostEqual(firmware.position_output(0, 361, rev=1), 0.1)
 
@@ -205,7 +203,7 @@ class PositionGainTests(unittest.TestCase):
         self.assertEqual(firmware.call("_Z28save_control_params_to_flashv"), 1)
         destination, payload = firmware.flash_writes.pop()
         self.assertEqual(destination, PARAM_ADDR)
-        self.assertEqual(len(payload), 40)
+        self.assertEqual(len(payload), 48)  # Includes the slave electrical offset.
         self.assertEqual(struct.unpack_from("<I", payload, 0)[0], 0x4350524D)
         self.assertEqual(struct.unpack_from("<ff", payload, 8), velocity)
         self.assertEqual(struct.unpack_from("<I", payload, 24)[0], 0x50504431)

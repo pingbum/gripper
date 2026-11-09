@@ -100,4 +100,5 @@ struct State_t {
   uint32_t CONTROL_MODE = 0;
   float32_t debug;
   flags_t error_flags;
+  float32_t i_ff = 0.0f; // Position feedforward current [A], mechanical sign.
 };
