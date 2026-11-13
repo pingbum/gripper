@@ -60,6 +60,19 @@ def pack_command_payload(mode_id: int, value_float: float) -> bytes:
 
     return pack_s32_be(raw) + b"\x00\x00\x00\x00"
 
+def pack_position_payload(position_deg: float, i_ff_a: float = 0.0) -> bytes:
+    """
+    위치 명령(mode 0x05) 8바이트, feedforward current 펌웨어용.
+      [0..3] s32 BE 위치 (0.01 deg), [4..5] s16 BE i_ff (mA, mechanical sign), [6..7] 0
+    i_ff = 0이면 pack_command_payload(MODE_POSITION, position_deg)와 같다.
+    """
+    if not math.isfinite(position_deg) or not math.isfinite(i_ff_a):
+        raise ValueError("Position and feedforward current must be finite")
+    i_ff_ma = int(round(i_ff_a * 1000.0))
+    if not -32768 <= i_ff_ma <= 32767:
+        raise ValueError(f"Feedforward current out of int16 mA range: {i_ff_a} A")
+    return struct.pack(">ih", int(round(position_deg * 100)), i_ff_ma) + b"\x00\x00"
+
 def parse_broadcast_frame(data: bytes) -> Dict[str, float]:
     """
     8바이트 브로드캐스트 프레임을 해석해 dict로 반환.
