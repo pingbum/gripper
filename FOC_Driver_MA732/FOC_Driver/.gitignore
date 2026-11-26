@@ -21,3 +21,6 @@ config_default/
 .clangd
 .settings
 .venv
+
+# Large local recordings (videos/zip); keep out of git
+tools/recordings/
