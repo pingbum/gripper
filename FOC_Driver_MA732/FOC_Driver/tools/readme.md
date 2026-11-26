@@ -41,6 +41,7 @@ tools/
 ├─ open_loop.py          # 독립 실행 오픈루프 전압 제어 GUI (7극쌍 RPM 표시)
 ├─ cogging_LUT.py        # 독립 실행 cogging 자동 측정 / 6회차+최종 LUT 점검 GUI
 ├─ cogging_reader.py     # Cogging 0x30/0x31/0x32 프로토콜 / TXT 저장 (Qt 의존성 없음)
+├─ LPF_check.py          # 독립 실행 LPF ON/OFF 전류 비교 측정 GUI (0x40~0x45, CSV 저장)
 ├─ LUT.py                # 독립 실행 엔코더 보정 LUT 점검 GUI
 ├─ lut_reader.py         # LUT 읽기 / 전체 수집 / CSV 저장 (Qt 의존성 없음)
 ├─ config.py             # 상수/기본 설정
